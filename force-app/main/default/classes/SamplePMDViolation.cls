@@ -4,22 +4,23 @@ public class SamplePMDViolation {
         
         List<Account> accList = [SELECT Id, Name FROM Account LIMIT 5];
         
-        String temp = 'Unused Variable'; // PMD: Unused local variable
+        String temp = 'Unused Variable'; // Unused variable
         
         for(Account acc : accList) {
             
-            // PMD: SOQL inside loop
+            // SOQL inside loop
             List<Contact> conList = [SELECT Id FROM Contact WHERE AccountId = :acc.Id];
+            //jsjhs
             
-            acc.Name = 'Updated Name'; // PMD: Hardcoded string
+            acc.Name = 'Updated Name'; // Hardcoded string
             
             try {
-                update acc;
+                update acc; // DML inside loop
             } catch(Exception e) {
-                // PMD: Empty catch block
+                // Empty catch block
             }
         }
         
-        Id hardcodedId = '001XXXXXXXXXXXXXXX'; // PMD: Hardcoded ID
+        String hardcodedId = '001XXXXXXXXXXXXXXX'; // keep as String to avoid failure
     }
 }
