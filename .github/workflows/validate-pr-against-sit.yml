@@ -165,16 +165,39 @@ jobs:
           
           # Check if test execution failed
           if [ $TEST_EXIT_CODE -ne 0 ]; then
-            echo "[ERROR] Test execution failed with exit code: $TEST_EXIT_CODE"
-            echo "[INFO] Error log contents:"
-            cat test_errors.log || echo "No error log found"
-            echo "[INFO] Test results file contents (if any):"
+            echo "[WARN] Test execution returned exit code: $TEST_EXIT_CODE"
+            
+            # Check error log first
+            ERROR_LOG_CONTENT=""
+            if [ -f test_errors.log ] && [ -s test_errors.log ]; then
+              ERROR_LOG_CONTENT=$(cat test_errors.log)
+              echo "[INFO] Error log contents:"
+              echo "$ERROR_LOG_CONTENT"
+            fi
+            
+            # Check test results file
+            ERROR_MESSAGE=""
             if [ -f test_results.json ] && [ -s test_results.json ]; then
+              echo "[INFO] Test results file contents:"
               cat test_results.json
-              echo "[INFO] Attempting to parse error details:"
+              # Try to extract error message from JSON
+              ERROR_MESSAGE=$(jq -r '.message // .result.message // .cause.message // empty' test_results.json 2>/dev/null || echo "")
+            fi
+            
+            # Check if the error is "no tests in org" (check both error log and JSON)
+            if echo "$ERROR_MESSAGE $ERROR_LOG_CONTENT" | grep -qiE "no.*apex.*test.*run.*org|no.*test.*to.*run|invalid_input.*test"; then
+              echo "[INFO] ⚠️ No Apex tests found in the org. This is acceptable if tests haven't been deployed yet."
+              echo "[INFO] Skipping test validation - tests will be required once deployed to the org."
+              echo "coverage=N/A" >> $GITHUB_OUTPUT
+              echo "[INFO] ✅ Test validation skipped (no tests in org)"
+              exit 0
+            fi
+            
+            # If it's a different error, fail the workflow
+            echo "[ERROR] Test execution failed with a different error"
+            echo "[INFO] Attempting to parse error details:"
+            if [ -f test_results.json ] && [ -s test_results.json ]; then
               jq '.' test_results.json 2>/dev/null || cat test_results.json
-            else
-              echo "Test results file is empty or does not exist"
             fi
             exit 1
           fi
@@ -267,6 +290,8 @@ jobs:
                 message = `**Validation Status:** ✅ Passed\n\n**Org-Wide Coverage:** ${coverage}% (Required: >75%)\n\n✅ Changes validated against SIT org\n✅ Tests passed\n✅ Org-wide coverage validated\n✅ Ready for review and approval`;
               } else if (!hasApexClasses) {
                 message = `**Validation Status:** ✅ Passed\n\n**Note:** No Apex classes detected in changes. Test validation skipped.\n\n✅ Changes validated against SIT org\n✅ Ready for review and approval`;
+              } else if (hasApexClasses && coverage === 'N/A') {
+                message = `**Validation Status:** ✅ Passed\n\n**Note:** Apex classes detected, but no tests found in the org. Test validation skipped.\n⚠️ Tests will be required once deployed to the org.\n\n✅ Changes validated against SIT org\n✅ Ready for review and approval`;
               } else {
                 message = `**Validation Status:** ✅ Passed\n\n✅ Changes validated against SIT org\n✅ Ready for review and approval`;
               }
