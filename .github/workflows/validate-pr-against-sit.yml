@@ -106,30 +106,49 @@ jobs:
         run: |
           echo "[INFO] Running all local tests to validate org-wide coverage"
           
-          # Run tests and capture output
-          if ! sf apex run test \
+          # Run tests and capture both stdout and stderr
+          set +e  # Don't exit on error immediately
+          sf apex run test \
             --test-level RunLocalTests \
             --target-org CRM_DevTrial \
             --code-coverage \
             --json \
-            --wait 120 > test_results.json 2>&1; then
-            echo "[ERROR] Test execution failed"
-            echo "[INFO] Test results file contents:"
-            cat test_results.json || echo "Could not read test_results.json"
-            echo "[INFO] Attempting to parse error details:"
-            jq '.' test_results.json 2>/dev/null || cat test_results.json
+            --wait 120 > test_results.json 2>test_errors.log
+          TEST_EXIT_CODE=$?
+          set -e  # Re-enable exit on error
+          
+          # Check if test execution failed
+          if [ $TEST_EXIT_CODE -ne 0 ]; then
+            echo "[ERROR] Test execution failed with exit code: $TEST_EXIT_CODE"
+            echo "[INFO] Error log contents:"
+            cat test_errors.log || echo "No error log found"
+            echo "[INFO] Test results file contents (if any):"
+            if [ -f test_results.json ] && [ -s test_results.json ]; then
+              cat test_results.json
+              echo "[INFO] Attempting to parse error details:"
+              jq '.' test_results.json 2>/dev/null || cat test_results.json
+            else
+              echo "Test results file is empty or does not exist"
+            fi
             exit 1
           fi
           
           # Check if test_results.json has valid content
-          if [ ! -s test_results.json ]; then
-            echo "[ERROR] Test results file is empty"
+          if [ ! -f test_results.json ] || [ ! -s test_results.json ]; then
+            echo "[ERROR] Test results file is empty or does not exist"
             exit 1
           fi
           
           # Display test summary
           echo "[INFO] Test execution completed. Parsing results..."
-          jq '.result.summary' test_results.json || echo "[WARN] Could not parse test summary"
+          TEST_SUMMARY=$(jq -r '.result.summary // empty' test_results.json 2>/dev/null)
+          if [ -z "$TEST_SUMMARY" ]; then
+            echo "[WARN] Could not parse test summary, showing full results:"
+            jq '.' test_results.json || cat test_results.json
+          else
+            echo "[INFO] Test Summary:"
+            jq '.result.summary' test_results.json
+          fi
           
           # Calculate org-wide coverage from codeCoverage array
           TOTAL_COVERED=$(jq -r '[.result.codeCoverage[]?.numLinesCovered // 0] | add' test_results.json)
