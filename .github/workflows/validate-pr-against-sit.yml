@@ -100,11 +100,31 @@ jobs:
           
           echo "[INFO] ✅ Successfully authenticated to Salesforce org"
 
-      # Step 7: Run Apex Tests and Check Org-Wide Coverage
+      # Step 7: Check for Apex classes in changes
+      - name: Check for Apex Classes
+        id: check-apex
+        run: |
+          echo "[INFO] Checking for Apex classes in changes..."
+          if [ -d "changed-sources/force-app" ]; then
+            APEX_CLASSES=$(find changed-sources/force-app -name "*.cls" -not -name "*Test.cls" -not -name "*Test.cls-meta.xml" 2>/dev/null | wc -l)
+            APEX_TEST_CLASSES=$(find changed-sources/force-app -name "*Test.cls" -not -name "*.cls-meta.xml" 2>/dev/null | wc -l)
+            echo "[INFO] Found $APEX_CLASSES Apex class(es) and $APEX_TEST_CLASSES test class(es) in changes"
+            echo "has_apex_classes=$([ $APEX_CLASSES -gt 0 ] && echo 'true' || echo 'false')" >> $GITHUB_OUTPUT
+            echo "has_test_classes=$([ $APEX_TEST_CLASSES -gt 0 ] && echo 'true' || echo 'false')" >> $GITHUB_OUTPUT
+            echo "apex_classes_count=$APEX_CLASSES" >> $GITHUB_OUTPUT
+          else
+            echo "[INFO] No changes detected in force-app"
+            echo "has_apex_classes=false" >> $GITHUB_OUTPUT
+            echo "has_test_classes=false" >> $GITHUB_OUTPUT
+            echo "apex_classes_count=0" >> $GITHUB_OUTPUT
+          fi
+
+      # Step 8: Run Apex Tests and Check Org-Wide Coverage
       - name: Run Apex Tests and Check Org-Wide Coverage
         id: apex
+        if: steps.check-apex.outputs.has_apex_classes == 'true'
         run: |
-          echo "[INFO] Running all local tests to validate org-wide coverage"
+          echo "[INFO] Apex classes detected. Running tests to validate org-wide coverage..."
           
           # Run tests and capture both stdout and stderr
           set +e  # Don't exit on error immediately
@@ -179,6 +199,15 @@ jobs:
           fi
           
           echo "[INFO] ✅ Org-wide coverage validation passed: $COVERAGE%"
+      
+      # Step 8b: Skip tests if no Apex classes
+      - name: Skip Tests - No Apex Classes
+        id: apex-skip
+        if: steps.check-apex.outputs.has_apex_classes == 'false'
+        run: |
+          echo "[INFO] No Apex classes detected in changes. Skipping test execution."
+          echo "coverage=N/A" >> $GITHUB_OUTPUT
+          echo "[INFO] ✅ Test validation skipped (no Apex classes to test)"
 
       # Step 8: Validate Changes
       - name: Validate Changes
@@ -200,20 +229,28 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
             const hasChanges = '${{ steps.validate-changes.outputs.has_changes }}' === 'true';
-            const coverage = '${{ steps.apex.outputs.coverage }}';
+            const hasApexClasses = '${{ steps.check-apex.outputs.has_apex_classes }}' === 'true';
+            const coverage = '${{ steps.apex.outputs.coverage || steps.apex-skip.outputs.coverage }}';
             const workflowStatus = '${{ job.status }}';
             const isSuccess = workflowStatus === 'success';
             
             let status, message;
             if (isSuccess && hasChanges) {
               status = '✅';
-              message = `**Validation Status:** ✅ Passed\n\n**Org-Wide Coverage:** ${coverage}% (Required: >75%)\n\n✅ Changes validated against SIT org\n✅ Tests passed\n✅ Org-wide coverage validated\n✅ Ready for review and approval`;
+              if (hasApexClasses && coverage !== 'N/A') {
+                message = `**Validation Status:** ✅ Passed\n\n**Org-Wide Coverage:** ${coverage}% (Required: >75%)\n\n✅ Changes validated against SIT org\n✅ Tests passed\n✅ Org-wide coverage validated\n✅ Ready for review and approval`;
+              } else if (!hasApexClasses) {
+                message = `**Validation Status:** ✅ Passed\n\n**Note:** No Apex classes detected in changes. Test validation skipped.\n\n✅ Changes validated against SIT org\n✅ Ready for review and approval`;
+              } else {
+                message = `**Validation Status:** ✅ Passed\n\n✅ Changes validated against SIT org\n✅ Ready for review and approval`;
+              }
             } else if (isSuccess && !hasChanges) {
               status = '⚠️';
               message = `**Validation Status:** ⚠️ No changes detected\n\nPlease verify this PR contains the expected changes.`;
             } else {
               status = '❌';
-              message = `**Validation Status:** ❌ Failed\n\n**Org-Wide Coverage:** ${coverage}% (Required: >75%)\n\nPlease fix the issues and update the PR.`;
+              const coverageMsg = coverage && coverage !== 'N/A' ? `**Org-Wide Coverage:** ${coverage}% (Required: >75%)\n\n` : '';
+              message = `**Validation Status:** ❌ Failed\n\n${coverageMsg}Please fix the issues and update the PR.`;
             }
             
             github.rest.issues.createComment({
@@ -227,9 +264,14 @@ jobs:
       - name: Summary
         if: always()
         run: |
+          COVERAGE="${{ steps.apex.outputs.coverage || steps.apex-skip.outputs.coverage }}"
           echo "### Validation Summary (SIT)" >> $GITHUB_STEP_SUMMARY
           echo "**Delta created:** Yes" >> $GITHUB_STEP_SUMMARY
-          echo "**Org-Wide Coverage:** ${{ steps.apex.outputs.coverage }}%" >> $GITHUB_STEP_SUMMARY
+          if [ "$COVERAGE" = "N/A" ]; then
+            echo "**Org-Wide Coverage:** N/A (No Apex classes detected)" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "**Org-Wide Coverage:** ${COVERAGE}%" >> $GITHUB_STEP_SUMMARY
+          fi
           echo "**Validation against SIT:** ${{ job.status }}" >> $GITHUB_STEP_SUMMARY
           echo "**PR:** ${{ github.event.pull_request.html_url }}" >> $GITHUB_STEP_SUMMARY
           if [ "${{ job.status }}" = "success" ]; then
