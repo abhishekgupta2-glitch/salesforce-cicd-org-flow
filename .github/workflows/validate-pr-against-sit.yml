@@ -318,16 +318,30 @@ jobs:
       - name: Summary
         if: always()
         run: |
-          COVERAGE="${{ steps.apex.outputs.coverage || steps.apex-skip.outputs.coverage }}"
+          # Get coverage from either apex or apex-skip step
+          APEX_COVERAGE="${{ steps.apex.outputs.coverage }}"
+          SKIP_COVERAGE="${{ steps.apex-skip.outputs.coverage }}"
+          
+          if [ -n "$APEX_COVERAGE" ] && [ "$APEX_COVERAGE" != "null" ]; then
+            COVERAGE="$APEX_COVERAGE"
+          elif [ -n "$SKIP_COVERAGE" ] && [ "$SKIP_COVERAGE" != "null" ]; then
+            COVERAGE="$SKIP_COVERAGE"
+          else
+            COVERAGE="N/A"
+          fi
+          
           echo "### Validation Summary (SIT)" >> $GITHUB_STEP_SUMMARY
           echo "**Delta created:** Yes" >> $GITHUB_STEP_SUMMARY
-          if [ "$COVERAGE" = "N/A" ]; then
-            echo "**Org-Wide Coverage:** N/A (No Apex classes detected)" >> $GITHUB_STEP_SUMMARY
+          
+          if [ "$COVERAGE" = "N/A" ] || [ -z "$COVERAGE" ]; then
+            echo "**Org-Wide Coverage:** N/A (No tests executed or no Apex classes detected)" >> $GITHUB_STEP_SUMMARY
           else
             echo "**Org-Wide Coverage:** ${COVERAGE}%" >> $GITHUB_STEP_SUMMARY
           fi
+          
           echo "**Validation against SIT:** ${{ job.status }}" >> $GITHUB_STEP_SUMMARY
           echo "**PR:** ${{ github.event.pull_request.html_url }}" >> $GITHUB_STEP_SUMMARY
+          
           if [ "${{ job.status }}" = "success" ]; then
             echo "✅ **Status:** Validation passed - PR ready for approval" >> $GITHUB_STEP_SUMMARY
           else
