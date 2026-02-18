@@ -10,7 +10,7 @@ public class SamplePMDViolation {
             
             // SOQL inside loop
             List<Contact> conList = [SELECT Id FROM Contact WHERE AccountId = :acc.Id];
-            //jsjhs
+            //jsjhs sjdhdhid
             
             acc.Name = 'Updated Name'; // Hardcoded string
             
