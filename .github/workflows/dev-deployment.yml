@@ -1,0 +1,130 @@
+name: Deploy to Dev Environment
+
+on:
+  pull_request:
+    branches: [ OrgSource ]
+    paths:
+      - 'force-app/**'
+      - 'manifest/**'
+# Environment variables
+env:
+  SF_USE_GENERIC_UNIX_KEYCHAIN: true
+  SF_DOMAIN_RETRY: 300
+  SF_DISABLE_APP_HUB: true
+  SF_LOG_LEVEL: DEBUG
+
+jobs:
+  validate-deployment:
+    runs-on: ubuntu-latest
+
+    steps:
+    # Checkout the repository
+    - name: Checkout source code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0  # Fetch full history for git diff
+
+    # Setup Node.js
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+
+    # Install Salesforce CLI via NPM
+    - name: Install Salesforce CLI
+      run: |
+        npm install -g @salesforce/cli
+        sf --version
+
+    # Install SFDX Git Delta for package.xml generation
+    - name: Install SFDX Git Delta
+      run: |
+        echo y | sf plugins install sfdx-git-delta
+
+    # Create JWT key file from secret
+    - name: Create JWT Key File
+      run: |
+        echo "${{ secrets.SF_JWT_KEY }}" > jwt-key.txt
+        chmod 600 jwt-key.txt
+
+    # Authenticate to Salesforce using JWT
+    - name: Authenticate to Salesforce
+      run: |
+        sf org login jwt \
+          --client-id ${{ secrets.SF_CLIENT_ID }} \
+          --jwt-key-file jwt-key.txt \
+          --username ${{ secrets.SF_USERNAME }} \
+          --instance-url ${{ secrets.SF_INSTANCE_URL }} \
+          --alias target-org \
+          --set-default
+
+    # Verify authentication
+    - name: Verify Authentication
+      run: |
+        sf org display --target-org target-org
+
+    # Generate delta package.xml using git diff
+    - name: Generate Delta Package
+      run: |
+        # Get the base branch (main/master)
+        BASE_BRANCH="${{ github.event.pull_request.base.ref }}"
+        HEAD_BRANCH="${{ github.event.pull_request.head.sha }}"
+        
+        echo "Generating delta package between $BASE_BRANCH and $HEAD_BRANCH"
+        
+        # Create delta directory
+        mkdir -p delta
+        
+        # Generate package.xml for changed components
+        sf sgd:source:delta \
+          --to $HEAD_BRANCH \
+          --from origin/$BASE_BRANCH \
+          --output-dir delta \
+          --generate-delta
+
+        # Display generated package.xml
+        echo "Generated package.xml:"
+        if [ -f "delta/package/package.xml" ]; then
+          cat delta/package/package.xml
+        else
+          echo "No package.xml generated"
+        fi
+        
+        # Check if there are any changes to deploy
+        if [ ! -f "delta/package/package.xml" ] || [ ! -s "delta/package/package.xml" ]; then
+          echo "No metadata changes detected"
+          echo "SKIP_DEPLOYMENT=true" >> $GITHUB_ENV
+        else
+          echo "SKIP_DEPLOYMENT=false" >> $GITHUB_ENV
+        fi
+
+    # Validate deployment (Check Only)
+    - name: Validate Deployment
+      id: validate_step # Assign an ID to this step to access its outputs
+      if: env.SKIP_DEPLOYMENT == 'false'
+      run: |
+        echo "Starting validation deployment..."
+        
+        # Run validation with test execution
+        VALIDATION_RESULT=$(sf project deploy validate \
+          --manifest delta/package/package.xml \
+          --target-org target-org \
+          --test-level RunLocalTests \
+          --wait 30 \
+          --json)
+
+        # Extract the 'id' field from the JSON output & Store the ID as a step output
+        DEPLOY_ID=$(echo "$VALIDATION_RESULT" | jq -r '.result.id')
+        echo "validation_id=$DEPLOY_ID" >> $GITHUB_OUTPUT
+        echo "Validation ID: $DEPLOY_ID"
+      
+    # Quick Deploy using Validation ID
+    - name: Deploy to Target Org
+      if: success() && steps.validate_step.outputs.validation_id
+      run: |
+        echo "Starting quick deployment using ID: ${{ steps.validate_step.outputs.validation_id }}"
+        sf project deploy quick \
+          --deploy-id ${{ steps.validate_step.outputs.validation_id }} \
+          --target-org target-org \
+          --wait 30 \
+          --verbose
