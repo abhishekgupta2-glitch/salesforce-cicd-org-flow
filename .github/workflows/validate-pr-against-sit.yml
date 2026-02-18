@@ -105,15 +105,31 @@ jobs:
         id: apex
         run: |
           echo "[INFO] Running all local tests to validate org-wide coverage"
-          sf apex run test \
+          
+          # Run tests and capture output
+          if ! sf apex run test \
             --test-level RunLocalTests \
             --target-org CRM_DevTrial \
             --code-coverage \
             --json \
-            --wait 120 > test_results.json || {
-              echo "[ERROR] Test execution failed"
-              exit 1
-            }
+            --wait 120 > test_results.json 2>&1; then
+            echo "[ERROR] Test execution failed"
+            echo "[INFO] Test results file contents:"
+            cat test_results.json || echo "Could not read test_results.json"
+            echo "[INFO] Attempting to parse error details:"
+            jq '.' test_results.json 2>/dev/null || cat test_results.json
+            exit 1
+          fi
+          
+          # Check if test_results.json has valid content
+          if [ ! -s test_results.json ]; then
+            echo "[ERROR] Test results file is empty"
+            exit 1
+          fi
+          
+          # Display test summary
+          echo "[INFO] Test execution completed. Parsing results..."
+          jq '.result.summary' test_results.json || echo "[WARN] Could not parse test summary"
           
           # Calculate org-wide coverage from codeCoverage array
           TOTAL_COVERED=$(jq -r '[.result.codeCoverage[]?.numLinesCovered // 0] | add' test_results.json)
