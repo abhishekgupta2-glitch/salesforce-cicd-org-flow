@@ -67,7 +67,7 @@ jobs:
             --client-id "${{ secrets.SF_CLIENT_ID_DEVTRIAL }}" \
             --instance-url "${{ secrets.SF_INSTANCE_URL_DEVTRIAL }}" \
             --set-default \
-            --alias CRM2_USSIT
+            --alias CRM_DevTrial
 
       # Step 7: Run Apex Tests and Check Org-Wide Coverage
       - name: Run Apex Tests and Check Org-Wide Coverage
@@ -76,7 +76,7 @@ jobs:
           echo "[INFO] Running all local tests to validate org-wide coverage"
           sf apex run test \
             --test-level RunLocalTests \
-            --target-org CRM2_USSIT \
+            --target-org CRM_DevTrial \
             --code-coverage \
             --json \
             --wait 120 > test_results.json || {
