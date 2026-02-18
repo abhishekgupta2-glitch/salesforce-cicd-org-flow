@@ -3,7 +3,7 @@ name: Validation PR against SIT
 on:
   pull_request:
     branches:
-      - OrgSource
+      - CRM_Dev1
     types: [opened, synchronize, reopened, ready_for_review]
 
 jobs:
