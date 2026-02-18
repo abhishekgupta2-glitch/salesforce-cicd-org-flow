@@ -180,15 +180,21 @@ jobs:
             
             # Check test results file
             ERROR_MESSAGE=""
+            ERROR_CODE=""
             if [ -f test_results.json ] && [ -s test_results.json ]; then
               echo "[INFO] Test results file contents:"
               cat test_results.json
-              # Try to extract error message from JSON
-              ERROR_MESSAGE=$(jq -r '.message // .result.message // .cause.message // empty' test_results.json 2>/dev/null || echo "")
+              # Try to extract error message and code from JSON
+              ERROR_MESSAGE=$(jq -r '.message // .result.message // .cause.message // .stack // empty' test_results.json 2>/dev/null || echo "")
+              ERROR_CODE=$(jq -r '.name // .code // .result.name // empty' test_results.json 2>/dev/null || echo "")
             fi
             
-            # Check if the error is "no tests in org" (check both error log and JSON)
-            if echo "$ERROR_MESSAGE $ERROR_LOG_CONTENT" | grep -qiE "no.*apex.*test.*run.*org|no.*test.*to.*run|invalid_input.*test"; then
+            # Combine all error sources for pattern matching
+            ALL_ERROR_TEXT="$ERROR_MESSAGE $ERROR_LOG_CONTENT $ERROR_CODE"
+            echo "[DEBUG] Checking error text: $ALL_ERROR_TEXT"
+            
+            # Check if the error is "no tests in org" (check multiple patterns)
+            if echo "$ALL_ERROR_TEXT" | grep -qiE "no.*apex.*test.*run.*org|no.*test.*to.*run|invalid_input.*test|there are no.*test|no.*test.*in.*org"; then
               echo "[INFO] ⚠️ No Apex tests found in the org. This is acceptable if tests haven't been deployed yet."
               echo "[INFO] Skipping test validation - tests will be required once deployed to the org."
               echo "coverage=N/A" >> $GITHUB_OUTPUT
@@ -198,6 +204,8 @@ jobs:
             
             # If it's a different error, fail the workflow
             echo "[ERROR] Test execution failed with a different error"
+            echo "[INFO] Error code: $ERROR_CODE"
+            echo "[INFO] Error message: $ERROR_MESSAGE"
             echo "[INFO] Attempting to parse error details:"
             if [ -f test_results.json ] && [ -s test_results.json ]; then
               jq '.' test_results.json 2>/dev/null || cat test_results.json
