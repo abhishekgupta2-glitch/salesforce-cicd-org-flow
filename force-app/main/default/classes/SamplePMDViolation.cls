@@ -12,7 +12,7 @@ public class SamplePMDViolation {
             List<Contact> conList = [SELECT Id FROM Contact WHERE AccountId = :acc.Id];
             //jsjhs sjdhdhid
             
-            acc.Name = 'Updated Name'; // Hardcoded string
+            acc.Name = 'Updated Name'; // Hardcoded stringnkhjhbbh
             
             try {
                 update acc; // DML inside loop
