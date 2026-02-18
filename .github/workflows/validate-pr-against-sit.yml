@@ -121,8 +121,23 @@ jobs:
             ALL_ERROR_TEXT="$ERROR_MESSAGE $ERROR_LOG_CONTENT $ERROR_CODE"
             echo "[DEBUG] Checking error text: $ALL_ERROR_TEXT"
             
-            # Check if the error is "no tests" (check multiple patterns including the new one)
-            if echo "$ALL_ERROR_TEXT" | grep -qiE "no.*test.*found.*category|no.*apex.*test.*run.*org|no.*test.*to.*run|invalid_input.*test|there are no.*test|no.*test.*in.*org"; then
+            # Check if the error is "no tests" - use multiple checks for reliability
+            IS_NO_TEST_ERROR=false
+            
+            # Check error code first
+            if [ "$ERROR_CODE" = "INVALID_INPUT" ]; then
+              # If it's INVALID_INPUT, check if message contains "no test" patterns
+              if echo "$ERROR_MESSAGE" | grep -qiE "no.*test.*found|no.*test.*category|no.*apex.*test"; then
+                IS_NO_TEST_ERROR=true
+              fi
+            fi
+            
+            # Also check the combined text with multiple patterns
+            if echo "$ALL_ERROR_TEXT" | grep -qiE "no.*test.*found.*category|no.*test.*found|no.*apex.*test.*run.*org|no.*test.*to.*run|invalid_input.*test|there are no.*test|no.*test.*in.*org"; then
+              IS_NO_TEST_ERROR=true
+            fi
+            
+            if [ "$IS_NO_TEST_ERROR" = true ]; then
               echo "[INFO] ⚠️ No Apex tests found in the org. This is acceptable if tests haven't been deployed yet."
               echo "[INFO] Skipping test validation - tests will be required once deployed to the org."
               echo "coverage=N/A" >> $GITHUB_OUTPUT
