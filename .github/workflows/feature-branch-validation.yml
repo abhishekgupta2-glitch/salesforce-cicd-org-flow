@@ -1,0 +1,292 @@
+name: Feature Branch Validation and Promotion
+
+on:
+  push:
+    branches:
+      - 'feature/**'  # Triggers on push to any feature branch
+    paths-ignore:
+      - '**.md'
+      - '.gitignore'
+
+jobs:
+  precheck-and-promote:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      checks: write
+    
+    steps:
+      # Step 1: Checkout repository
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+          ref: ${{ github.ref }}
+      
+      # Step 1b: Configure Git
+      - name: Configure Git
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+      # Step 2: Setup Node
+      - uses: actions/setup-node@v3
+        with:
+          node-version: '18'
+
+      # Step 3: Install Salesforce CLI
+      - name: Install Salesforce CLI
+        run: npm install @salesforce/cli --global
+
+      # Step 4: Install PMD
+      - name: Install PMD
+        run: |
+          wget -q https://github.com/pmd/pmd/releases/download/pmd_releases%2F7.0.0/pmd-bin-7.0.0.zip
+          unzip -q pmd-bin-7.0.0.zip
+          sudo mv pmd-bin-7.0.0 /opt/pmd
+          sudo chmod +x /opt/pmd/bin/pmd
+          echo "/opt/pmd/bin" >> $GITHUB_PATH
+          pmd --version
+
+      # Step 5: Run PMD Apex Checks
+      - name: Run PMD Apex Checks
+        id: pmd-check
+        continue-on-error: false
+        run: |
+          echo "[INFO] Running PMD Apex checks..."
+          
+          # Find all Apex classes
+          APEX_FILES=$(find force-app -name "*.cls" -not -name "*.cls-meta.xml" 2>/dev/null || true)
+          
+          if [ -z "$APEX_FILES" ]; then
+            echo "[INFO] No Apex classes found. Skipping PMD checks."
+            echo "pmd_passed=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          
+          echo "[INFO] Found Apex files to check"
+          
+          # Run PMD with Apex ruleset (using category rules)
+          set +e
+          PMD_OUTPUT=$(pmd check -d force-app -R category/apex/security.xml,category/apex/performance.xml,category/apex/bestpractices.xml -f json 2>&1)
+          PMD_EXIT_CODE=$?
+          set -e
+          
+          echo "[INFO] PMD Exit Code: $PMD_EXIT_CODE"
+          echo "[INFO] PMD Output:"
+          echo "$PMD_OUTPUT"
+          
+          # Check if PMD ran successfully
+          if [ $PMD_EXIT_CODE -ne 0 ] && [ $PMD_EXIT_CODE -ne 4 ]; then
+            echo "[ERROR] PMD execution failed with exit code: $PMD_EXIT_CODE"
+            echo "pmd_passed=false" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+          
+          # Check if PMD found violations (exit code 4 means violations found)
+          if [ $PMD_EXIT_CODE -eq 4 ]; then
+            VIOLATION_COUNT=$(echo "$PMD_OUTPUT" | jq -r '[.files[].violations[]?] | length' 2>/dev/null || echo "0")
+            if [ "$VIOLATION_COUNT" -gt 0 ]; then
+              echo "[ERROR] PMD found $VIOLATION_COUNT violation(s)"
+              echo "[INFO] PMD violations:"
+              echo "$PMD_OUTPUT" | jq '.files[] | select(.violations != null and (.violations | length > 0))' 2>/dev/null || echo "$PMD_OUTPUT"
+              echo "pmd_passed=false" >> $GITHUB_OUTPUT
+              exit 1
+            fi
+          fi
+          
+          echo "[INFO] ✅ PMD checks passed - No violations found"
+          echo "pmd_passed=true" >> $GITHUB_OUTPUT
+
+      # Step 6: Create Promotional Branch from CRM_Dev1
+      - name: Create Promotional Branch
+        if: steps.pmd-check.outputs.pmd_passed == 'true'
+        id: create-promo-branch
+        run: |
+          FEATURE_BRANCH="${GITHUB_REF#refs/heads/}"
+          # Extract feature number (e.g., feature/103 -> 103)
+          FEATURE_NUM=$(echo "$FEATURE_BRANCH" | sed 's/feature\///g' | sed 's/feature-//g')
+          PROMO_BRANCH="promo/$FEATURE_NUM"
+          
+          echo "[INFO] Feature branch: $FEATURE_BRANCH"
+          echo "[INFO] Creating promotional branch: $PROMO_BRANCH"
+          
+          # Fetch all branches
+          git fetch origin CRM_Dev1
+          git fetch origin "$FEATURE_BRANCH"
+          
+          # Check if promotional branch already exists
+          if git ls-remote --heads origin "$PROMO_BRANCH" | grep -q "$PROMO_BRANCH"; then
+            echo "[INFO] Promotional branch already exists, checking it out"
+            git fetch origin "$PROMO_BRANCH"
+            git checkout "$PROMO_BRANCH"
+            git reset --hard origin/"$PROMO_BRANCH"
+          else
+            # Create promotional branch from CRM_Dev1
+            git checkout -b "$PROMO_BRANCH" origin/CRM_Dev1
+          fi
+          
+          # Merge feature branch into promotional branch
+          git merge "origin/$FEATURE_BRANCH" -m "Merge $FEATURE_BRANCH into promotional branch" || {
+            echo "[ERROR] Failed to merge feature branch into promotional branch"
+            exit 1
+          }
+          
+          echo "promo_branch=$PROMO_BRANCH" >> $GITHUB_OUTPUT
+          echo "[INFO] ✅ Promotional branch created and feature branch merged"
+
+      # Step 7: Install sfdx-git-delta
+      - name: Install sfdx git delta
+        if: steps.pmd-check.outputs.pmd_passed == 'true'
+        run: |
+          echo Y | sfdx plugins:install sfdx-git-delta
+          sfdx plugins
+
+      # Step 8: Generate Delta Packages
+      - name: Create delta packages
+        if: steps.pmd-check.outputs.pmd_passed == 'true'
+        run: |
+          mkdir -p changed-sources
+          PROMO_BRANCH="${{ steps.create-promo-branch.outputs.promo_branch }}"
+          
+          echo "[INFO] Comparing CRM_Dev1 to $PROMO_BRANCH"
+          
+          git fetch origin CRM_Dev1
+          PREV_COMMIT=$(git rev-parse origin/CRM_Dev1)
+          
+          sf sgd source delta \
+            --from "$PREV_COMMIT" \
+            --to "HEAD" \
+            --output "changed-sources" \
+            --generate-delta \
+            --source "force-app"
+          
+          echo "[INFO] Delta generation complete"
+          echo "[INFO] Listing delta output:"
+          ls -R changed-sources || echo "No changes detected"
+
+      # Step 9: Authorize CRM_DevTrial org (JWT)
+      - name: Authorize CRM_DevTrial Org (JWT)
+        if: steps.pmd-check.outputs.pmd_passed == 'true'
+        run: |
+          echo "${{ secrets.SF_JWT_KEY_DEVTRIAL }}" > server.key
+          sf org login jwt \
+            --username "${{ secrets.SF_USERNAME_DEVTRIAL }}" \
+            --jwt-key-file server.key \
+            --client-id "${{ secrets.SF_CLIENT_ID_DEVTRIAL }}" \
+            --instance-url "${{ secrets.SF_INSTANCE_URL_DEVTRIAL }}" \
+            --set-default \
+            --alias CRM_DevTrial
+
+      # Step 10: Run Apex Tests and Check Org-Wide Coverage
+      - name: Run Apex Tests and Check Org-Wide Coverage
+        if: steps.pmd-check.outputs.pmd_passed == 'true'
+        id: apex
+        run: |
+          echo "[INFO] Running all local tests to validate org-wide coverage"
+          sf apex run test \
+            --test-level RunLocalTests \
+            --target-org CRM_DevTrial \
+            --code-coverage \
+            --json \
+            --wait 120 > test_results.json || {
+              echo "[ERROR] Test execution failed"
+              exit 1
+            }
+          
+          # Calculate org-wide coverage from codeCoverage array
+          TOTAL_COVERED=$(jq -r '[.result.codeCoverage[]?.numLinesCovered // 0] | add' test_results.json)
+          TOTAL_UNCOVERED=$(jq -r '[.result.codeCoverage[]?.numLinesUncovered // 0] | add' test_results.json)
+          TOTAL_LINES=$((TOTAL_COVERED + TOTAL_UNCOVERED))
+          
+          if [ "$TOTAL_LINES" -gt 0 ]; then
+            COVERAGE=$(echo "scale=2; $TOTAL_COVERED * 100 / $TOTAL_LINES" | bc)
+            echo "[INFO] Org-wide coverage: $COVERAGE% (Covered: $TOTAL_COVERED, Total: $TOTAL_LINES)"
+          else
+            # Fallback to orgWideCoverage from summary if available
+            COVERAGE=$(jq -r '.result.summary.orgWideCoverage // 0' test_results.json)
+            if [ "$COVERAGE" = "0" ] || [ -z "$COVERAGE" ] || [ "$COVERAGE" = "null" ]; then
+              echo "[ERROR] Could not calculate org-wide coverage"
+              exit 1
+            fi
+            echo "[INFO] Org-wide coverage from summary: $COVERAGE%"
+          fi
+          
+          echo "coverage=$COVERAGE" >> $GITHUB_OUTPUT
+          
+          # Validate org-wide coverage > 75%
+          if (( $(echo "$COVERAGE <= 75" | bc -l) )); then
+            echo "[ERROR] Org-wide coverage must be greater than 75% (Current: $COVERAGE%)"
+            echo "[INFO] Test results summary:"
+            jq '.result.summary' test_results.json
+            exit 1
+          fi
+          
+          echo "[INFO] ✅ Org-wide coverage validation passed: $COVERAGE%"
+
+      # Step 11: Push Promotional Branch and Create PR
+      - name: Push Promotional Branch and Create PR
+        if: steps.pmd-check.outputs.pmd_passed == 'true' && steps.apex.outputs.coverage != ''
+        uses: actions/github-script@v6
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const promoBranch = '${{ steps.create-promo-branch.outputs.promo_branch }}';
+            const featureBranch = '${GITHUB_REF#refs/heads/}';
+            const coverage = '${{ steps.apex.outputs.coverage }}';
+            
+            // Push promotional branch
+            const { execSync } = require('child_process');
+            try {
+              execSync(`git push origin ${promoBranch}`, { stdio: 'inherit' });
+              console.log(`✅ Promotional branch ${promoBranch} pushed successfully`);
+            } catch (error) {
+              console.log(`⚠️ Branch ${promoBranch} might already exist, continuing...`);
+            }
+            
+            // Check if PR already exists
+            const { data: existingPRs } = await github.rest.pulls.list({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              head: `${context.repo.owner}:${promoBranch}`,
+              base: 'CRM_Dev1',
+              state: 'open'
+            });
+            
+            if (existingPRs.length > 0) {
+              console.log(`ℹ️ PR already exists: ${existingPRs[0].html_url}`);
+              return;
+            }
+            
+            // Create PR
+            const { data: pr } = await github.rest.pulls.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `Promotional Branch: ${promoBranch}`,
+              head: promoBranch,
+              base: 'CRM_Dev1',
+              body: `## Promotional Branch Validation Results\n\n**Feature Branch:** \`${featureBranch}\`\n**Promotional Branch:** \`${promoBranch}\`\n\n**Validation Status:** ✅ Passed\n\n**Org-Wide Coverage:** ${coverage}% (Required: >75%)\n\n✅ PMD checks passed\n✅ Tests passed\n✅ Org-wide coverage validated\n✅ Ready for review and merge`
+            });
+            
+            console.log(`✅ PR created: ${pr.html_url}`);
+
+      # Step 12: Summary
+      - name: Summary
+        if: always()
+        run: |
+          echo "### Feature Branch Validation Summary" >> $GITHUB_STEP_SUMMARY
+          echo "**Feature Branch:** \`${GITHUB_REF#refs/heads/}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**PMD Checks:** ${{ steps.pmd-check.outputs.pmd_passed }}" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ steps.pmd-check.outputs.pmd_passed }}" = "true" ]; then
+            echo "**Promotional Branch:** \`${{ steps.create-promo-branch.outputs.promo_branch }}\`" >> $GITHUB_STEP_SUMMARY
+            echo "**Org-Wide Coverage:** ${{ steps.apex.outputs.coverage }}%" >> $GITHUB_STEP_SUMMARY
+          fi
+          echo "**Validation Status:** ${{ job.status }}" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ job.status }}" = "success" ]; then
+            echo "✅ **Status:** All validations passed - PR created" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "❌ **Status:** Validation failed - Please fix issues" >> $GITHUB_STEP_SUMMARY
+          fi
