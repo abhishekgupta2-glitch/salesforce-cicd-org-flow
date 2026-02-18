@@ -9,6 +9,11 @@ on:
 jobs:
   validate-pr-against-sit:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+      checks: write
     
     steps:
       # Step 1: Checkout repository
