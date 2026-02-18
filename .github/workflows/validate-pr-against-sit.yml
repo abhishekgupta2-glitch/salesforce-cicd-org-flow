@@ -65,14 +65,40 @@ jobs:
       # Step 6: Authorize SIT org (JWT)
       - name: Authorize SIT Org (JWT)
         run: |
+          echo "[INFO] Setting up JWT authentication..."
+          # Create server.key file with proper formatting
           echo "${{ secrets.SF_JWT_KEY_DEVTRIAL }}" > server.key
+          
+          # Verify key file was created
+          if [ ! -f server.key ]; then
+            echo "[ERROR] Failed to create server.key file"
+            exit 1
+          fi
+          
+          # Verify key file has content
+          if [ ! -s server.key ]; then
+            echo "[ERROR] server.key file is empty"
+            exit 1
+          fi
+          
+          echo "[INFO] Attempting JWT authentication..."
           sf org login jwt \
             --username "${{ secrets.SF_USERNAME_DEVTRIAL }}" \
             --jwt-key-file server.key \
             --client-id "${{ secrets.SF_CLIENT_ID_DEVTRIAL }}" \
             --instance-url "${{ secrets.SF_INSTANCE_URL_DEVTRIAL }}" \
             --set-default \
-            --alias CRM_DevTrial
+            --alias CRM_DevTrial || {
+              echo "[ERROR] JWT authentication failed"
+              echo "[INFO] Please verify:"
+              echo "  - JWT key matches the Connected App"
+              echo "  - Username is correct"
+              echo "  - Consumer Key (Client ID) is correct"
+              echo "  - Instance URL is correct"
+              exit 1
+            }
+          
+          echo "[INFO] ✅ Successfully authenticated to Salesforce org"
 
       # Step 7: Run Apex Tests and Check Org-Wide Coverage
       - name: Run Apex Tests and Check Org-Wide Coverage
