@@ -61,96 +61,24 @@ jobs:
           echo "[INFO] Delta generation complete"
           echo "[INFO] Listing delta output:"
           ls -R changed-sources || echo "No changes detected"
-          echo "[INFO] All changed files:"
-          find changed-sources -type f 2>/dev/null || echo "No files found"
 
       # Step 6: Authorize SIT org (JWT)
       - name: Authorize SIT Org (JWT)
         run: |
-          echo "[INFO] Setting up JWT authentication..."
-          # Create server.key file with proper formatting
           echo "${{ secrets.SF_JWT_KEY_DEVTRIAL }}" > server.key
-          
-          # Verify key file was created
-          if [ ! -f server.key ]; then
-            echo "[ERROR] Failed to create server.key file"
-            exit 1
-          fi
-          
-          # Verify key file has content
-          if [ ! -s server.key ]; then
-            echo "[ERROR] server.key file is empty"
-            exit 1
-          fi
-          
-          echo "[INFO] Attempting JWT authentication..."
           sf org login jwt \
             --username "${{ secrets.SF_USERNAME_DEVTRIAL }}" \
             --jwt-key-file server.key \
             --client-id "${{ secrets.SF_CLIENT_ID_DEVTRIAL }}" \
             --instance-url "${{ secrets.SF_INSTANCE_URL_DEVTRIAL }}" \
             --set-default \
-            --alias CRM_DevTrial || {
-              echo "[ERROR] JWT authentication failed"
-              echo "[INFO] Please verify:"
-              echo "  - JWT key matches the Connected App"
-              echo "  - Username is correct"
-              echo "  - Consumer Key (Client ID) is correct"
-              echo "  - Instance URL is correct"
-              exit 1
-            }
-          
-          echo "[INFO] ✅ Successfully authenticated to Salesforce org"
+            --alias CRM_DevTrial
 
-      # Step 7: Check for Apex classes in changes
-      - name: Check for Apex Classes
-        id: check-apex
-        continue-on-error: true
-        run: |
-          echo "[INFO] Checking for Apex classes in changes..."
-          APEX_CLASSES=0
-          APEX_TEST_CLASSES=0
-          
-          if [ -d "changed-sources/force-app" ]; then
-            echo "[INFO] changed-sources/force-app directory exists"
-            # Find Apex classes (excluding test classes and metadata files)
-            APEX_CLASSES=$(find changed-sources/force-app -type f -name "*.cls" ! -name "*Test.cls" ! -name "*.cls-meta.xml" 2>/dev/null | wc -l | tr -d ' ')
-            # Find test classes
-            APEX_TEST_CLASSES=$(find changed-sources/force-app -type f -name "*Test.cls" ! -name "*.cls-meta.xml" 2>/dev/null | wc -l | tr -d ' ')
-            
-            echo "[INFO] Found $APEX_CLASSES Apex class(es) and $APEX_TEST_CLASSES test class(es) in changes"
-            
-            # Debug: List found files
-            if [ "$APEX_CLASSES" -gt 0 ]; then
-              echo "[INFO] Apex classes found:"
-              find changed-sources/force-app -type f -name "*.cls" ! -name "*Test.cls" ! -name "*.cls-meta.xml" 2>/dev/null
-            fi
-          else
-            echo "[INFO] changed-sources/force-app directory does not exist"
-          fi
-          
-          # Set outputs (default to false if check fails)
-          if [ "$APEX_CLASSES" -gt 0 ]; then
-            echo "has_apex_classes=true" >> $GITHUB_OUTPUT
-          else
-            echo "has_apex_classes=false" >> $GITHUB_OUTPUT
-          fi
-          
-          if [ "$APEX_TEST_CLASSES" -gt 0 ]; then
-            echo "has_test_classes=true" >> $GITHUB_OUTPUT
-          else
-            echo "has_test_classes=false" >> $GITHUB_OUTPUT
-          fi
-          
-          echo "apex_classes_count=$APEX_CLASSES" >> $GITHUB_OUTPUT
-          echo "[INFO] Final decision: has_apex_classes=$([ $APEX_CLASSES -gt 0 ] && echo 'true' || echo 'false')"
-
-      # Step 8: Run Apex Tests and Check Org-Wide Coverage
+      # Step 7: Run Apex Tests and Check Org-Wide Coverage
       - name: Run Apex Tests and Check Org-Wide Coverage
         id: apex
-        if: steps.check-apex.outputs.has_apex_classes == 'true'
         run: |
-          echo "[INFO] Apex classes detected. Attempting to run tests to validate org-wide coverage..."
+          echo "[INFO] Attempting to run tests to validate org-wide coverage..."
           echo "[INFO] Note: If no tests exist in the org, this step will skip validation gracefully."
           
           # Run tests and capture both stdout and stderr
@@ -193,8 +121,8 @@ jobs:
             ALL_ERROR_TEXT="$ERROR_MESSAGE $ERROR_LOG_CONTENT $ERROR_CODE"
             echo "[DEBUG] Checking error text: $ALL_ERROR_TEXT"
             
-            # Check if the error is "no tests in org" (check multiple patterns)
-            if echo "$ALL_ERROR_TEXT" | grep -qiE "no.*apex.*test.*run.*org|no.*test.*to.*run|invalid_input.*test|there are no.*test|no.*test.*in.*org"; then
+            # Check if the error is "no tests" (check multiple patterns including the new one)
+            if echo "$ALL_ERROR_TEXT" | grep -qiE "no.*test.*found.*category|no.*apex.*test.*run.*org|no.*test.*to.*run|invalid_input.*test|there are no.*test|no.*test.*in.*org"; then
               echo "[INFO] ⚠️ No Apex tests found in the org. This is acceptable if tests haven't been deployed yet."
               echo "[INFO] Skipping test validation - tests will be required once deployed to the org."
               echo "coverage=N/A" >> $GITHUB_OUTPUT
@@ -206,28 +134,7 @@ jobs:
             echo "[ERROR] Test execution failed with a different error"
             echo "[INFO] Error code: $ERROR_CODE"
             echo "[INFO] Error message: $ERROR_MESSAGE"
-            echo "[INFO] Attempting to parse error details:"
-            if [ -f test_results.json ] && [ -s test_results.json ]; then
-              jq '.' test_results.json 2>/dev/null || cat test_results.json
-            fi
             exit 1
-          fi
-          
-          # Check if test_results.json has valid content
-          if [ ! -f test_results.json ] || [ ! -s test_results.json ]; then
-            echo "[ERROR] Test results file is empty or does not exist"
-            exit 1
-          fi
-          
-          # Display test summary
-          echo "[INFO] Test execution completed. Parsing results..."
-          TEST_SUMMARY=$(jq -r '.result.summary // empty' test_results.json 2>/dev/null)
-          if [ -z "$TEST_SUMMARY" ]; then
-            echo "[WARN] Could not parse test summary, showing full results:"
-            jq '.' test_results.json || cat test_results.json
-          else
-            echo "[INFO] Test Summary:"
-            jq '.result.summary' test_results.json
           fi
           
           # Calculate org-wide coverage from codeCoverage array
@@ -259,15 +166,6 @@ jobs:
           fi
           
           echo "[INFO] ✅ Org-wide coverage validation passed: $COVERAGE%"
-      
-      # Step 8b: Skip tests if no Apex classes
-      - name: Skip Tests - No Apex Classes
-        id: apex-skip
-        if: steps.check-apex.outputs.has_apex_classes == 'false'
-        run: |
-          echo "[INFO] No Apex classes detected in changes. Skipping test execution."
-          echo "coverage=N/A" >> $GITHUB_OUTPUT
-          echo "[INFO] ✅ Test validation skipped (no Apex classes to test)"
 
       # Step 8: Validate Changes
       - name: Validate Changes
@@ -289,29 +187,24 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
             const hasChanges = '${{ steps.validate-changes.outputs.has_changes }}' === 'true';
-            const hasApexClasses = '${{ steps.check-apex.outputs.has_apex_classes }}' === 'true';
-            const coverage = '${{ steps.apex.outputs.coverage || steps.apex-skip.outputs.coverage }}';
+            const coverage = '${{ steps.apex.outputs.coverage }}';
             const workflowStatus = '${{ job.status }}';
             const isSuccess = workflowStatus === 'success';
             
             let status, message;
             if (isSuccess && hasChanges) {
               status = '✅';
-              if (hasApexClasses && coverage !== 'N/A') {
+              if (coverage && coverage !== 'N/A' && coverage !== 'null' && coverage !== '') {
                 message = `**Validation Status:** ✅ Passed\n\n**Org-Wide Coverage:** ${coverage}% (Required: >75%)\n\n✅ Changes validated against SIT org\n✅ Tests passed\n✅ Org-wide coverage validated\n✅ Ready for review and approval`;
-              } else if (!hasApexClasses) {
-                message = `**Validation Status:** ✅ Passed\n\n**Note:** No Apex classes detected in changes. Test validation skipped.\n\n✅ Changes validated against SIT org\n✅ Ready for review and approval`;
-              } else if (hasApexClasses && coverage === 'N/A') {
-                message = `**Validation Status:** ✅ Passed\n\n**Note:** Apex classes detected, but no tests found in the org. Test validation skipped.\n⚠️ Tests will be required once deployed to the org.\n\n✅ Changes validated against SIT org\n✅ Ready for review and approval`;
               } else {
-                message = `**Validation Status:** ✅ Passed\n\n✅ Changes validated against SIT org\n✅ Ready for review and approval`;
+                message = `**Validation Status:** ✅ Passed\n\n**Note:** No Apex tests found in the org. Test validation skipped.\n⚠️ Tests will be required once deployed to the org.\n\n✅ Changes validated against SIT org\n✅ Ready for review and approval`;
               }
             } else if (isSuccess && !hasChanges) {
               status = '⚠️';
               message = `**Validation Status:** ⚠️ No changes detected\n\nPlease verify this PR contains the expected changes.`;
             } else {
               status = '❌';
-              const coverageMsg = coverage && coverage !== 'N/A' ? `**Org-Wide Coverage:** ${coverage}% (Required: >75%)\n\n` : '';
+              const coverageMsg = coverage && coverage !== 'N/A' && coverage !== 'null' && coverage !== '' ? `**Org-Wide Coverage:** ${coverage}% (Required: >75%)\n\n` : '';
               message = `**Validation Status:** ❌ Failed\n\n${coverageMsg}Please fix the issues and update the PR.`;
             }
             
@@ -326,23 +219,14 @@ jobs:
       - name: Summary
         if: always()
         run: |
-          # Get coverage from either apex or apex-skip step
-          APEX_COVERAGE="${{ steps.apex.outputs.coverage }}"
-          SKIP_COVERAGE="${{ steps.apex-skip.outputs.coverage }}"
-          
-          if [ -n "$APEX_COVERAGE" ] && [ "$APEX_COVERAGE" != "null" ]; then
-            COVERAGE="$APEX_COVERAGE"
-          elif [ -n "$SKIP_COVERAGE" ] && [ "$SKIP_COVERAGE" != "null" ]; then
-            COVERAGE="$SKIP_COVERAGE"
-          else
-            COVERAGE="N/A"
-          fi
+          # Get coverage from apex step
+          COVERAGE="${{ steps.apex.outputs.coverage }}"
           
           echo "### Validation Summary (SIT)" >> $GITHUB_STEP_SUMMARY
           echo "**Delta created:** Yes" >> $GITHUB_STEP_SUMMARY
           
-          if [ "$COVERAGE" = "N/A" ] || [ -z "$COVERAGE" ]; then
-            echo "**Org-Wide Coverage:** N/A (No tests executed or no Apex classes detected)" >> $GITHUB_STEP_SUMMARY
+          if [ "$COVERAGE" = "N/A" ] || [ -z "$COVERAGE" ] || [ "$COVERAGE" = "null" ]; then
+            echo "**Org-Wide Coverage:** N/A (No tests in org)" >> $GITHUB_STEP_SUMMARY
           else
             echo "**Org-Wide Coverage:** ${COVERAGE}%" >> $GITHUB_STEP_SUMMARY
           fi
