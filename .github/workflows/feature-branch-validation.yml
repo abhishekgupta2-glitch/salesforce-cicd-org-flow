@@ -41,116 +41,43 @@ jobs:
       - name: Install Salesforce CLI
         run: npm install @salesforce/cli --global
 
-      # Step 4: Install PMD with Multiple Fallback Methods
+      # Step 4: Install PMD using reliable method
       - name: Install PMD
         id: install-pmd
-        continue-on-error: true
         run: |
           echo "[INFO] Installing PMD for Apex code analysis..."
-          PMD_INSTALLED=false
-          PMD_METHOD=""
           
-          # Method 1: Try downloading PMD 7.0.0
-          echo "[INFO] Method 1: Trying to download PMD 7.0.0..."
+          # Install Java (required for PMD)
+          sudo apt-get update
+          sudo apt-get install -y openjdk-17-jdk
+          java -version
+          
+          # Download and install PMD 7.0.0
           PMD_VERSION="7.0.0"
           PMD_URL="https://github.com/pmd/pmd/releases/download/pmd_releases%2F${PMD_VERSION}/pmd-bin-${PMD_VERSION}.zip"
           
-          if curl -L -f -o pmd-bin.zip "$PMD_URL" 2>&1; then
-            echo "[INFO] PMD downloaded successfully"
-            if unzip -q pmd-bin.zip 2>&1; then
-              sudo mkdir -p /opt/pmd
-              if [ -d "pmd-bin-${PMD_VERSION}" ]; then
-                sudo mv pmd-bin-${PMD_VERSION}/* /opt/pmd/ 2>/dev/null || sudo cp -r pmd-bin-${PMD_VERSION}/* /opt/pmd/
-                PMD_BIN="/opt/pmd/bin/pmd"
-              else
-                sudo mv pmd-bin-${PMD_VERSION} /opt/pmd
-                PMD_BIN="/opt/pmd/pmd-bin-${PMD_VERSION}/bin/pmd"
-              fi
-              sudo chmod +x "$PMD_BIN" 2>/dev/null || true
-              if "$PMD_BIN" --version 2>&1 | head -1; then
-                echo "/opt/pmd/bin" >> $GITHUB_PATH
-                echo "/opt/pmd/pmd-bin-${PMD_VERSION}/bin" >> $GITHUB_PATH
-                echo "pmd_available=true" >> $GITHUB_OUTPUT
-                echo "pmd_method=direct" >> $GITHUB_OUTPUT
-                PMD_INSTALLED=true
-                PMD_METHOD="direct"
-                echo "[INFO] ✅ PMD installed successfully via direct download"
-              fi
-            fi
-          fi
+          echo "[INFO] Downloading PMD ${PMD_VERSION}..."
+          curl -L -o pmd-bin.zip "$PMD_URL"
           
-          # Method 2: Try PMD 6.55.0 if 7.0.0 failed
-          if [ "$PMD_INSTALLED" != "true" ]; then
-            echo "[INFO] Method 2: Trying PMD 6.55.0..."
-            PMD_VERSION="6.55.0"
-            PMD_URL="https://github.com/pmd/pmd/releases/download/pmd_releases%2F${PMD_VERSION}/pmd-bin-${PMD_VERSION}.zip"
-            
-            if curl -L -f -o pmd-bin.zip "$PMD_URL" 2>&1; then
-              if unzip -q pmd-bin.zip 2>&1; then
-                sudo mkdir -p /opt/pmd
-                if [ -d "pmd-bin-${PMD_VERSION}" ]; then
-                  sudo mv pmd-bin-${PMD_VERSION}/* /opt/pmd/ 2>/dev/null || sudo cp -r pmd-bin-${PMD_VERSION}/* /opt/pmd/
-                  PMD_BIN="/opt/pmd/bin/pmd"
-                else
-                  sudo mv pmd-bin-${PMD_VERSION} /opt/pmd
-                  PMD_BIN="/opt/pmd/pmd-bin-${PMD_VERSION}/bin/pmd"
-                fi
-                sudo chmod +x "$PMD_BIN" 2>/dev/null || true
-                if "$PMD_BIN" --version 2>&1 | head -1; then
-                  echo "/opt/pmd/bin" >> $GITHUB_PATH
-                  echo "/opt/pmd/pmd-bin-${PMD_VERSION}/bin" >> $GITHUB_PATH
-                  echo "pmd_available=true" >> $GITHUB_OUTPUT
-                  echo "pmd_method=direct_v6" >> $GITHUB_OUTPUT
-                  PMD_INSTALLED=true
-                  PMD_METHOD="direct_v6"
-                  echo "[INFO] ✅ PMD 6.55.0 installed successfully"
-                fi
-              fi
-            fi
-          fi
+          echo "[INFO] Extracting PMD..."
+          unzip -q pmd-bin.zip
           
-          # Method 3: Install via Homebrew (if available on Ubuntu)
-          if [ "$PMD_INSTALLED" != "true" ]; then
-            echo "[INFO] Method 3: Trying Homebrew installation..."
-            if command -v brew &> /dev/null || sudo apt-get update && sudo apt-get install -y homebrew 2>/dev/null; then
-              if brew install pmd 2>&1 || sudo brew install pmd 2>&1; then
-                if pmd --version 2>&1 | head -1; then
-                  echo "pmd_available=true" >> $GITHUB_OUTPUT
-                  echo "pmd_method=homebrew" >> $GITHUB_OUTPUT
-                  PMD_INSTALLED=true
-                  PMD_METHOD="homebrew"
-                  echo "[INFO] ✅ PMD installed via Homebrew"
-                fi
-              fi
-            fi
-          fi
+          # Move PMD to /opt/pmd
+          sudo mkdir -p /opt/pmd
+          sudo mv pmd-bin-${PMD_VERSION}/* /opt/pmd/
+          sudo chmod +x /opt/pmd/bin/pmd
           
-          # Method 4: Use Salesforce Code Analyzer as fallback
-          if [ "$PMD_INSTALLED" != "true" ]; then
-            echo "[INFO] Method 4: Installing Salesforce Code Analyzer as fallback..."
-            if npm install -g @salesforce/sfdx-scanner 2>&1; then
-              # Check if scanner command is available
-              if npx @salesforce/sfdx-scanner --version 2>&1 || npm list -g @salesforce/sfdx-scanner 2>&1; then
-                echo "pmd_available=true" >> $GITHUB_OUTPUT
-                echo "pmd_method=scanner" >> $GITHUB_OUTPUT
-                PMD_INSTALLED=true
-                PMD_METHOD="scanner"
-                echo "[INFO] ✅ Salesforce Code Analyzer installed as fallback"
-              fi
-            fi
-          fi
+          # Add to PATH
+          echo "/opt/pmd/bin" >> $GITHUB_PATH
           
-          if [ "$PMD_INSTALLED" != "true" ]; then
-            echo "[WARN] All PMD installation methods failed. Will use basic syntax checks instead."
-            echo "pmd_available=false" >> $GITHUB_OUTPUT
-            echo "pmd_method=none" >> $GITHUB_OUTPUT
-            # Don't exit - continue with basic checks
-          fi
+          # Verify installation
+          /opt/pmd/bin/pmd --version
+          
+          echo "pmd_available=true" >> $GITHUB_OUTPUT
+          echo "[INFO] ✅ PMD installed successfully"
 
       # Step 5: Create PMD Ruleset File
       - name: Create PMD Ruleset
-        id: create-ruleset
-        continue-on-error: true
         run: |
           echo "[INFO] Creating PMD ruleset file for Apex..."
           mkdir -p .pmd
@@ -173,11 +100,8 @@ jobs:
       # Step 6: Run PMD Apex Checks
       - name: Run PMD Apex Checks
         id: pmd-check
-        continue-on-error: false
         run: |
           echo "[INFO] Running PMD Apex checks..."
-          PMD_METHOD="${{ steps.install-pmd.outputs.pmd_method }}"
-          PMD_AVAILABLE="${{ steps.install-pmd.outputs.pmd_available }}"
           
           # Find all Apex classes
           APEX_FILES=$(find force-app -name "*.cls" -not -name "*.cls-meta.xml" 2>/dev/null || true)
@@ -189,136 +113,72 @@ jobs:
           fi
           
           echo "[INFO] Found Apex files to check:"
-          echo "$APEX_FILES" | head -5
+          echo "$APEX_FILES" | head -10
           
-          VIOLATION_COUNT=0
-          PMD_EXIT_CODE=0
+          # Run PMD with ruleset file
+          set +e
+          PMD_OUTPUT=$(/opt/pmd/bin/pmd check -d force-app -R .pmd/apex-ruleset.xml -f json 2>&1)
+          PMD_EXIT_CODE=$?
+          set -e
           
-          # If PMD is not available, do basic syntax validation
-          if [ "$PMD_AVAILABLE" != "true" ] || [ -z "$PMD_METHOD" ] || [ "$PMD_METHOD" = "none" ]; then
-            echo "[WARN] PMD not available. Performing basic Apex syntax validation..."
-            SYNTAX_ERRORS=0
-            for APEX_FILE in $APEX_FILES; do
-              # Basic syntax check - look for common issues
-              if grep -q "public.*class.*{" "$APEX_FILE" || grep -q "public.*interface.*{" "$APEX_FILE" || grep -q "@isTest" "$APEX_FILE"; then
-                echo "[INFO] Basic syntax check passed for: $APEX_FILE"
-              else
-                echo "[WARN] Potential syntax issue in: $APEX_FILE"
-                SYNTAX_ERRORS=$((SYNTAX_ERRORS + 1))
-              fi
-            done
+          echo "[INFO] PMD Exit Code: $PMD_EXIT_CODE"
+          echo "[INFO] PMD Output:"
+          echo "$PMD_OUTPUT" | head -200
+          
+          # PMD exit codes: 0 = no violations, 4 = violations found
+          if [ $PMD_EXIT_CODE -eq 4 ]; then
+            # Violations found - parse and report
+            VIOLATION_COUNT=$(echo "$PMD_OUTPUT" | jq -r '[.files[].violations[]?] | length' 2>/dev/null || echo "0")
             
-            if [ $SYNTAX_ERRORS -eq 0 ]; then
-              echo "[INFO] ✅ Basic syntax validation passed (PMD unavailable)"
+            if [ "$VIOLATION_COUNT" -gt 0 ]; then
+              echo "[ERROR] PMD found $VIOLATION_COUNT violation(s)"
+              echo "[INFO] PMD violations details:"
+              echo "$PMD_OUTPUT" | jq '.files[] | select(.violations != null and (.violations | length > 0))' 2>/dev/null || echo "$PMD_OUTPUT"
+              echo "pmd_passed=false" >> $GITHUB_OUTPUT
+              exit 1
+            else
+              echo "[INFO] PMD exit code 4 but no violations parsed. Treating as passed."
               echo "pmd_passed=true" >> $GITHUB_OUTPUT
               exit 0
+            fi
+          elif [ $PMD_EXIT_CODE -eq 0 ]; then
+            echo "[INFO] ✅ PMD checks passed - No violations found"
+            echo "pmd_passed=true" >> $GITHUB_OUTPUT
+            exit 0
+          else
+            # PMD execution error - try fallback method
+            echo "[WARN] PMD execution returned exit code $PMD_EXIT_CODE"
+            echo "[INFO] Trying alternative PMD command..."
+            
+            # Try without ruleset file
+            set +e
+            PMD_OUTPUT=$(/opt/pmd/bin/pmd check -d force-app \
+              -R category/apex/security.xml,category/apex/performance.xml,category/apex/bestpractices.xml \
+              -f json 2>&1)
+            PMD_EXIT_CODE=$?
+            set -e
+            
+            if [ $PMD_EXIT_CODE -eq 0 ] || [ $PMD_EXIT_CODE -eq 4 ]; then
+              VIOLATION_COUNT=$(echo "$PMD_OUTPUT" | jq -r '[.files[].violations[]?] | length' 2>/dev/null || echo "0")
+              if [ "$VIOLATION_COUNT" -gt 0 ]; then
+                echo "[ERROR] PMD found $VIOLATION_COUNT violation(s)"
+                echo "$PMD_OUTPUT" | jq '.files[] | select(.violations != null and (.violations | length > 0))' 2>/dev/null || echo "$PMD_OUTPUT"
+                echo "pmd_passed=false" >> $GITHUB_OUTPUT
+                exit 1
+              else
+                echo "[INFO] ✅ PMD checks passed - No violations found"
+                echo "pmd_passed=true" >> $GITHUB_OUTPUT
+                exit 0
+              fi
             else
-              echo "[ERROR] Found $SYNTAX_ERRORS potential syntax issue(s)"
+              echo "[ERROR] PMD execution failed with exit code $PMD_EXIT_CODE"
+              echo "[ERROR] PMD output: $PMD_OUTPUT"
               echo "pmd_passed=false" >> $GITHUB_OUTPUT
               exit 1
             fi
           fi
-          
-          # Run PMD based on installation method
-          if [ "$PMD_METHOD" = "scanner" ]; then
-            echo "[INFO] Using Salesforce Code Analyzer for PMD checks..."
-            set +e
-            PMD_OUTPUT=$(npx @salesforce/sfdx-scanner scanner:run \
-              --target "force-app" \
-              --format json \
-              --category "Security,Apex Performance,Apex Best Practices" \
-              2>&1)
-            PMD_EXIT_CODE=$?
-            set -e
-            
-            echo "[INFO] Scanner Exit Code: $PMD_EXIT_CODE"
-            echo "[INFO] Scanner Output:"
-            echo "$PMD_OUTPUT" | head -50
-            
-            if [ $PMD_EXIT_CODE -eq 0 ]; then
-              VIOLATION_COUNT=$(echo "$PMD_OUTPUT" | jq -r '[.result[]?.violations[]?] | length' 2>/dev/null || echo "0")
-            fi
-          else
-            echo "[INFO] Using PMD directly for checks..."
-            # Find PMD binary
-            PMD_CMD=""
-            if command -v pmd &> /dev/null; then
-              PMD_CMD="pmd"
-            elif [ -f "/opt/pmd/bin/pmd" ]; then
-              PMD_CMD="/opt/pmd/bin/pmd"
-            elif [ -f "/opt/pmd/pmd-bin-7.0.0/bin/pmd" ]; then
-              PMD_CMD="/opt/pmd/pmd-bin-7.0.0/bin/pmd"
-            elif [ -f "/opt/pmd/pmd-bin-6.55.0/bin/pmd" ]; then
-              PMD_CMD="/opt/pmd/pmd-bin-6.55.0/bin/pmd"
-            fi
-            
-            if [ -z "$PMD_CMD" ]; then
-              echo "[WARN] PMD command not found despite installation. Falling back to basic syntax checks..."
-              SYNTAX_ERRORS=0
-              for APEX_FILE in $APEX_FILES; do
-                if grep -q "public.*class.*{" "$APEX_FILE" || grep -q "public.*interface.*{" "$APEX_FILE" || grep -q "@isTest" "$APEX_FILE"; then
-                  echo "[INFO] Basic syntax check passed for: $APEX_FILE"
-                else
-                  echo "[WARN] Potential syntax issue in: $APEX_FILE"
-                  SYNTAX_ERRORS=$((SYNTAX_ERRORS + 1))
-                fi
-              done
-              
-              if [ $SYNTAX_ERRORS -eq 0 ]; then
-                echo "[INFO] ✅ Basic syntax validation passed (PMD command unavailable)"
-                echo "pmd_passed=true" >> $GITHUB_OUTPUT
-                exit 0
-              else
-                echo "[ERROR] Found $SYNTAX_ERRORS potential syntax issue(s)"
-                echo "pmd_passed=false" >> $GITHUB_OUTPUT
-                exit 1
-              fi
-            fi
-            
-            echo "[INFO] Using PMD command: $PMD_CMD"
-            set +e
-            
-            # Try with ruleset file first
-            if [ -f ".pmd/apex-ruleset.xml" ]; then
-              PMD_OUTPUT=$($PMD_CMD check -d force-app -R .pmd/apex-ruleset.xml -f json 2>&1)
-              PMD_EXIT_CODE=$?
-            else
-              # Fallback to category rules
-              PMD_OUTPUT=$($PMD_CMD check -d force-app \
-                -R category/apex/security.xml,category/apex/performance.xml,category/apex/bestpractices.xml \
-                -f json 2>&1)
-              PMD_EXIT_CODE=$?
-            fi
-            set -e
-            
-            echo "[INFO] PMD Exit Code: $PMD_EXIT_CODE"
-            echo "[INFO] PMD Output:"
-            echo "$PMD_OUTPUT" | head -100
-            
-            # PMD exit codes: 0 = success, 4 = violations found
-            if [ $PMD_EXIT_CODE -eq 4 ] || [ $PMD_EXIT_CODE -eq 0 ]; then
-              VIOLATION_COUNT=$(echo "$PMD_OUTPUT" | jq -r '[.files[].violations[]?] | length' 2>/dev/null || echo "0")
-            fi
-          fi
-          
-          # Evaluate results
-          if [ "$VIOLATION_COUNT" -gt 0 ]; then
-            echo "[ERROR] PMD found $VIOLATION_COUNT violation(s)"
-            echo "[INFO] PMD violations details:"
-            if [ "$PMD_METHOD" = "scanner" ]; then
-              echo "$PMD_OUTPUT" | jq '.result[] | select(.violations != null and (.violations | length > 0))' 2>/dev/null || echo "$PMD_OUTPUT"
-            else
-              echo "$PMD_OUTPUT" | jq '.files[] | select(.violations != null and (.violations | length > 0))' 2>/dev/null || echo "$PMD_OUTPUT"
-            fi
-            echo "pmd_passed=false" >> $GITHUB_OUTPUT
-            exit 1
-          else
-            echo "[INFO] ✅ PMD checks passed - No violations found"
-            echo "pmd_passed=true" >> $GITHUB_OUTPUT
-            exit 0
-          fi
 
-      # Step 6: Create Promotional Branch from CRM_Dev1
+      # Step 7: Create Promotional Branch from CRM_Dev1
       - name: Create Promotional Branch
         if: steps.pmd-check.outputs.pmd_passed == 'true'
         id: create-promo-branch
@@ -355,14 +215,14 @@ jobs:
           echo "promo_branch=$PROMO_BRANCH" >> $GITHUB_OUTPUT
           echo "[INFO] ✅ Promotional branch created and feature branch merged"
 
-      # Step 7: Install sfdx-git-delta
+      # Step 8: Install sfdx-git-delta
       - name: Install sfdx git delta
         if: steps.pmd-check.outputs.pmd_passed == 'true'
         run: |
           echo Y | sfdx plugins:install sfdx-git-delta
           sfdx plugins
 
-      # Step 8: Generate Delta Packages
+      # Step 9: Generate Delta Packages
       - name: Create delta packages
         if: steps.pmd-check.outputs.pmd_passed == 'true'
         run: |
@@ -385,7 +245,7 @@ jobs:
           echo "[INFO] Listing delta output:"
           ls -R changed-sources || echo "No changes detected"
 
-      # Step 9: Authorize CRM_DevTrial org (JWT)
+      # Step 10: Authorize CRM_DevTrial org (JWT)
       - name: Authorize CRM_DevTrial Org (JWT)
         if: steps.pmd-check.outputs.pmd_passed == 'true'
         run: |
@@ -398,7 +258,7 @@ jobs:
             --set-default \
             --alias CRM_DevTrial
 
-      # Step 10: Run Apex Tests and Check Org-Wide Coverage
+      # Step 11: Run Apex Tests and Check Org-Wide Coverage
       - name: Run Apex Tests and Check Org-Wide Coverage
         if: steps.pmd-check.outputs.pmd_passed == 'true'
         id: apex
@@ -444,7 +304,7 @@ jobs:
           
           echo "[INFO] ✅ Org-wide coverage validation passed: $COVERAGE%"
 
-      # Step 11: Push Promotional Branch and Create PR
+      # Step 12: Push Promotional Branch and Create PR
       - name: Push Promotional Branch and Create PR
         if: steps.pmd-check.outputs.pmd_passed == 'true' && steps.apex.outputs.coverage != ''
         uses: actions/github-script@v6
@@ -490,7 +350,7 @@ jobs:
             
             console.log(`✅ PR created: ${pr.html_url}`);
 
-      # Step 12: Summary
+      # Step 13: Summary
       - name: Summary
         if: always()
         run: |
