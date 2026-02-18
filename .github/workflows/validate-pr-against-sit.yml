@@ -61,6 +61,8 @@ jobs:
           echo "[INFO] Delta generation complete"
           echo "[INFO] Listing delta output:"
           ls -R changed-sources || echo "No changes detected"
+          echo "[INFO] All changed files:"
+          find changed-sources -type f 2>/dev/null || echo "No files found"
 
       # Step 6: Authorize SIT org (JWT)
       - name: Authorize SIT Org (JWT)
@@ -103,21 +105,45 @@ jobs:
       # Step 7: Check for Apex classes in changes
       - name: Check for Apex Classes
         id: check-apex
+        continue-on-error: true
         run: |
           echo "[INFO] Checking for Apex classes in changes..."
+          APEX_CLASSES=0
+          APEX_TEST_CLASSES=0
+          
           if [ -d "changed-sources/force-app" ]; then
-            APEX_CLASSES=$(find changed-sources/force-app -name "*.cls" -not -name "*Test.cls" -not -name "*Test.cls-meta.xml" 2>/dev/null | wc -l)
-            APEX_TEST_CLASSES=$(find changed-sources/force-app -name "*Test.cls" -not -name "*.cls-meta.xml" 2>/dev/null | wc -l)
+            echo "[INFO] changed-sources/force-app directory exists"
+            # Find Apex classes (excluding test classes and metadata files)
+            APEX_CLASSES=$(find changed-sources/force-app -type f -name "*.cls" ! -name "*Test.cls" ! -name "*.cls-meta.xml" 2>/dev/null | wc -l | tr -d ' ')
+            # Find test classes
+            APEX_TEST_CLASSES=$(find changed-sources/force-app -type f -name "*Test.cls" ! -name "*.cls-meta.xml" 2>/dev/null | wc -l | tr -d ' ')
+            
             echo "[INFO] Found $APEX_CLASSES Apex class(es) and $APEX_TEST_CLASSES test class(es) in changes"
-            echo "has_apex_classes=$([ $APEX_CLASSES -gt 0 ] && echo 'true' || echo 'false')" >> $GITHUB_OUTPUT
-            echo "has_test_classes=$([ $APEX_TEST_CLASSES -gt 0 ] && echo 'true' || echo 'false')" >> $GITHUB_OUTPUT
-            echo "apex_classes_count=$APEX_CLASSES" >> $GITHUB_OUTPUT
+            
+            # Debug: List found files
+            if [ "$APEX_CLASSES" -gt 0 ]; then
+              echo "[INFO] Apex classes found:"
+              find changed-sources/force-app -type f -name "*.cls" ! -name "*Test.cls" ! -name "*.cls-meta.xml" 2>/dev/null
+            fi
           else
-            echo "[INFO] No changes detected in force-app"
-            echo "has_apex_classes=false" >> $GITHUB_OUTPUT
-            echo "has_test_classes=false" >> $GITHUB_OUTPUT
-            echo "apex_classes_count=0" >> $GITHUB_OUTPUT
+            echo "[INFO] changed-sources/force-app directory does not exist"
           fi
+          
+          # Set outputs (default to false if check fails)
+          if [ "$APEX_CLASSES" -gt 0 ]; then
+            echo "has_apex_classes=true" >> $GITHUB_OUTPUT
+          else
+            echo "has_apex_classes=false" >> $GITHUB_OUTPUT
+          fi
+          
+          if [ "$APEX_TEST_CLASSES" -gt 0 ]; then
+            echo "has_test_classes=true" >> $GITHUB_OUTPUT
+          else
+            echo "has_test_classes=false" >> $GITHUB_OUTPUT
+          fi
+          
+          echo "apex_classes_count=$APEX_CLASSES" >> $GITHUB_OUTPUT
+          echo "[INFO] Final decision: has_apex_classes=$([ $APEX_CLASSES -gt 0 ] && echo 'true' || echo 'false')"
 
       # Step 8: Run Apex Tests and Check Org-Wide Coverage
       - name: Run Apex Tests and Check Org-Wide Coverage
