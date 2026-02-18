@@ -150,7 +150,8 @@ jobs:
         id: apex
         if: steps.check-apex.outputs.has_apex_classes == 'true'
         run: |
-          echo "[INFO] Apex classes detected. Running tests to validate org-wide coverage..."
+          echo "[INFO] Apex classes detected. Attempting to run tests to validate org-wide coverage..."
+          echo "[INFO] Note: If no tests exist in the org, this step will skip validation gracefully."
           
           # Run tests and capture both stdout and stderr
           set +e  # Don't exit on error immediately
@@ -162,6 +163,8 @@ jobs:
             --wait 120 > test_results.json 2>test_errors.log
           TEST_EXIT_CODE=$?
           set -e  # Re-enable exit on error
+          
+          echo "[INFO] Test command completed with exit code: $TEST_EXIT_CODE"
           
           # Check if test execution failed
           if [ $TEST_EXIT_CODE -ne 0 ]; then
