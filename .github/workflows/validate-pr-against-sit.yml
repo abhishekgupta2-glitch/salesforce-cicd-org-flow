@@ -472,7 +472,7 @@ jobs:
             fi
           fi
 
-      # Step 7: Create Promotional Branch from CRM_Dev1
+      # Step 7: Create Promotional Branch from CRM_DevTrial
       - name: Create Promotional Branch
         if: steps.pmd-check.outputs.pmd_passed == 'true'
         id: create-promo-branch
@@ -486,7 +486,7 @@ jobs:
           echo "[INFO] Creating promotional branch: $PROMO_BRANCH"
           
           # Fetch all branches
-          git fetch origin CRM_Dev1
+          git fetch origin CRM_DevTrial
           git fetch origin "$FEATURE_BRANCH"
           
           # Check if promotional branch already exists
@@ -496,8 +496,8 @@ jobs:
             git checkout "$PROMO_BRANCH"
             git reset --hard origin/"$PROMO_BRANCH"
           else
-            # Create promotional branch from CRM_Dev1
-            git checkout -b "$PROMO_BRANCH" origin/CRM_Dev1
+            # Create promotional branch from CRM_DevTrial
+            git checkout -b "$PROMO_BRANCH" origin/CRM_DevTrial
           fi
           
           # Merge feature branch into promotional branch
@@ -523,10 +523,10 @@ jobs:
           mkdir -p changed-sources
           PROMO_BRANCH="${{ steps.create-promo-branch.outputs.promo_branch }}"
           
-          echo "[INFO] Comparing CRM_Dev1 to $PROMO_BRANCH"
+          echo "[INFO] Comparing CRM_DevTrial to $PROMO_BRANCH"
           
-          git fetch origin CRM_Dev1
-          PREV_COMMIT=$(git rev-parse origin/CRM_Dev1)
+          git fetch origin CRM_DevTrial
+          PREV_COMMIT=$(git rev-parse origin/CRM_DevTrial)
           
           sf sgd source delta \
             --from "$PREV_COMMIT" \
@@ -623,7 +623,7 @@ jobs:
               owner: context.repo.owner,
               repo: context.repo.repo,
               head: `${context.repo.owner}:${promoBranch}`,
-              base: 'CRM_Dev1',
+              base: 'CRM_DevTrial',
               state: 'open'
             });
             
@@ -638,7 +638,7 @@ jobs:
               repo: context.repo.repo,
               title: `Promotional Branch: ${promoBranch}`,
               head: promoBranch,
-              base: 'CRM_Dev1',
+              base: 'CRM_DevTrial',
               body: `## Promotional Branch Validation Results\n\n**Feature Branch:** \`${featureBranch}\`\n**Promotional Branch:** \`${promoBranch}\`\n\n**Validation Status:** ✅ Passed\n\n**Org-Wide Coverage:** ${coverage}% (Required: >75%)\n\n✅ PMD checks passed\n✅ Tests passed\n✅ Org-wide coverage validated\n✅ Ready for review and merge`
             });
             
