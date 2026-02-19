@@ -10,7 +10,7 @@ public class SamplePMDViolationTest {
         }
         insert accList;
 
-        // Create one Contact per Account (method queries them but does nothing with them beyond grouping)
+        // Create one Contact per Account (method queries them but does nothing with them beyond grouping)sd
         List<Contact> conList = new List<Contact>();
         for (Account acc : accList) {
             conList.add(new Contact(
