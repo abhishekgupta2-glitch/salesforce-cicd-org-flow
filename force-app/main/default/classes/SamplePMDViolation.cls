@@ -15,13 +15,13 @@ public with sharing class SamplePMDViolation {
             return;
         }
 
-        // Collect Account Ids
+        // Collect Account Idssjsjs snhjhsd
         Set<Id> accountIds = new Set<Id>();
         for (Account acc : accList) {
             accountIds.add(acc.Id);
         }
 
-        // Query Contacts outside loop (bulkified)
+        // Query Contacts outside loop (bulkified) ajhdhus
         Map<Id, List<Contact>> contactsByAccount = new Map<Id, List<Contact>>();
         for (Contact con : [
             SELECT Id, AccountId 
