@@ -21,7 +21,7 @@ public with sharing class SamplePMDViolation {
             accountIds.add(acc.Id);
         }
 
-        // Query Contacts outside loop (bulkified)
+        // Query Contacts outside loop (bulkified) ajhdhus
         Map<Id, List<Contact>> contactsByAccount = new Map<Id, List<Contact>>();
         for (Contact con : [
             SELECT Id, AccountId 
