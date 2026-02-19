@@ -296,7 +296,10 @@ jobs:
             echo "[INFO] Org-wide coverage: $COVERAGE% (Covered: $TOTAL_COVERED, Total: $TOTAL_LINES)"
           else
             # Fallback to orgWideCoverage from summary
-            COVERAGE=$(jq -r '.result.summary.orgWideCoverage // 0' test_results.json 2>/dev/null || echo "0")
+            COVERAGE_RAW=$(jq -r '.result.summary.orgWideCoverage // 0' test_results.json 2>/dev/null || echo "0")
+            # Remove % sign if present (Salesforce API sometimes returns "100%" instead of "100")
+            COVERAGE=$(echo "$COVERAGE_RAW" | sed 's/%//g' | tr -d ' ')
+            
             if [ "$COVERAGE" = "0" ] || [ -z "$COVERAGE" ] || [ "$COVERAGE" = "null" ]; then
               echo "[WARN] Could not calculate org-wide coverage from codeCoverage array or summary"
               echo "[INFO] Test results summary:"
@@ -307,6 +310,9 @@ jobs:
             fi
             echo "[INFO] Org-wide coverage from summary: $COVERAGE%"
           fi
+          
+          # Ensure COVERAGE is a number (remove any non-numeric characters except decimal point)
+          COVERAGE=$(echo "$COVERAGE" | sed 's/[^0-9.]//g')
           
           echo "coverage=$COVERAGE" >> $GITHUB_OUTPUT
           
