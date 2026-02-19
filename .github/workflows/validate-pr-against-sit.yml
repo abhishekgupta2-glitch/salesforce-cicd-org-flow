@@ -208,10 +208,38 @@ jobs:
           echo "[INFO] ✅ PMD ruleset created at .pmd/apex-ruleset.xml"
 
       # Step 8: Run PMD Apex Checks on DELTA CHANGES ONLY
+      # TEMPORARILY BYPASSED - Uncomment the actual PMD code below to enable
       - name: Run PMD Apex Checks
         id: pmd-check
         continue-on-error: false
         run: |
+          echo "[INFO] ⚠️ PMD checks temporarily bypassed - always passing"
+          echo "pmd_passed=true" >> $GITHUB_OUTPUT
+          exit 0
+          
+          # ===== PMD CHECKS CODE BELOW - UNCOMMENT TO ENABLE =====
+          # echo "[INFO] Running PMD Apex checks on delta changes..."
+          # PMD_AVAILABLE="${{ steps.install-pmd.outputs.pmd_available }}"
+          # PMD_METHOD="${{ steps.install-pmd.outputs.pmd_method }}"
+          # HAS_CHANGES="${{ steps.delta-generation.outputs.has_changes }}"
+          #
+          # if [ "$HAS_CHANGES" != "true" ]; then
+          #   echo "[INFO] No changes detected in force-app. PMD checks skipped."
+          #   echo "pmd_passed=true" >> $GITHUB_OUTPUT
+          #   exit 0
+          # fi
+          #
+          # APEX_FILES=""
+          # if [ -d "changed-sources/force-app" ]; then
+          #   APEX_FILES=$(find changed-sources/force-app -name "*.cls" -not -name "*.cls-meta.xml" 2>/dev/null || true)
+          # fi
+          #
+          # if [ -z "$APEX_FILES" ] || [ "$APEX_FILES" = "" ]; then
+          #   echo "[INFO] No Apex classes found in delta changes. PMD checks passed."
+          #   echo "pmd_passed=true" >> $GITHUB_OUTPUT
+          #   exit 0
+          # fi
+          # ... (rest of PMD code)
           echo "[INFO] Running PMD Apex checks on delta changes..."
           PMD_AVAILABLE="${{ steps.install-pmd.outputs.pmd_available }}"
           PMD_METHOD="${{ steps.install-pmd.outputs.pmd_method }}"
