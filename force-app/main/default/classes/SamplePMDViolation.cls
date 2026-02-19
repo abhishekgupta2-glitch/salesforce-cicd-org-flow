@@ -15,7 +15,7 @@ public with sharing class SamplePMDViolation {
             return;
         }
 
-        // Collect Account Idssjsjs snhjhsd
+        // Collect Account Idssjsjs 
         Set<Id> accountIds = new Set<Id>();
         for (Account acc : accList) {
             accountIds.add(acc.Id);
