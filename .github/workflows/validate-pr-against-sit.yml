@@ -71,21 +71,39 @@ jobs:
           
           # Check if promotional branch already exists
           if git ls-remote --heads origin "$PROMO_BRANCH" | grep -q "$PROMO_BRANCH"; then
-            echo "[INFO] Promotional branch already exists, checking it out"
-            git fetch origin "$PROMO_BRANCH"
-            git checkout "$PROMO_BRANCH"
-            git reset --hard origin/"$PROMO_BRANCH"
+            echo "[INFO] Promotional branch already exists"
+            echo "[INFO] Resetting promotional branch to $BASE_BRANCH to ensure clean merge"
+            git checkout -b "$PROMO_BRANCH" origin/$BASE_BRANCH 2>/dev/null || git checkout "$PROMO_BRANCH"
+            git reset --hard origin/$BASE_BRANCH || git reset --hard origin/main
+            echo "[INFO] Promotional branch reset to $BASE_BRANCH"
           else
             # Create promotional branch from CRM_DevTrial
+            echo "[INFO] Creating new promotional branch from $BASE_BRANCH"
             git checkout -b "$PROMO_BRANCH" origin/$BASE_BRANCH || git checkout -b "$PROMO_BRANCH" origin/main
           fi
           
+          # Check if feature branch is already merged (to avoid duplicate merges)
+          if git merge-base --is-ancestor "origin/$FEATURE_BRANCH" HEAD 2>/dev/null; then
+            echo "[INFO] Feature branch $FEATURE_BRANCH is already merged into promotional branch"
+            echo "[INFO] Checking if feature branch has new commits..."
+            FEATURE_COMMIT=$(git rev-parse "origin/$FEATURE_BRANCH")
+            CURRENT_COMMIT=$(git rev-parse HEAD)
+            if [ "$FEATURE_COMMIT" = "$CURRENT_COMMIT" ] || git merge-base --is-ancestor HEAD "origin/$FEATURE_BRANCH" 2>/dev/null; then
+              echo "[INFO] Promotional branch is up to date with feature branch. No merge needed."
+              echo "promo_branch=$PROMO_BRANCH" >> $GITHUB_OUTPUT
+              echo "merge_success=true" >> $GITHUB_OUTPUT
+              echo "base_commit=$BASE_COMMIT" >> $GITHUB_OUTPUT
+              exit 0
+            fi
+          fi
+          
           # CRITICAL: Try merge in dry-run mode first to detect conflicts
-          echo "[INFO] Checking for merge conflicts..."
+          echo "[INFO] Checking for merge conflicts between $FEATURE_BRANCH and $BASE_BRANCH..."
           git merge --no-commit --no-ff "origin/$FEATURE_BRANCH" || {
             MERGE_CONFLICT=$?
             echo "[ERROR] Merge conflict detected! Cannot proceed."
             echo "[ERROR] Please resolve conflicts between $FEATURE_BRANCH and $BASE_BRANCH"
+            echo "[ERROR] Conflict detected in promotional branch merge"
             git merge --abort 2>/dev/null || true
             echo "merge_success=false" >> $GITHUB_OUTPUT
             exit 1
@@ -99,6 +117,7 @@ jobs:
           git merge --no-ff "origin/$FEATURE_BRANCH" -m "Merge $FEATURE_BRANCH into promotional branch" || {
             echo "[ERROR] Failed to merge feature branch into promotional branch"
             echo "[ERROR] This might be due to conflicts or other merge issues"
+            echo "[ERROR] Please check if feature branch is in sync with $BASE_BRANCH"
             git merge --abort 2>/dev/null || true
             echo "merge_success=false" >> $GITHUB_OUTPUT
             exit 1
