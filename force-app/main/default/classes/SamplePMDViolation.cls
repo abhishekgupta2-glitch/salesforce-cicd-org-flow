@@ -39,11 +39,6 @@ public with sharing class SamplePMDViolation {
             acc.Name = UPDATED_NAME;
         }
 
-        try {
-            update accList; // Single DML
-        } catch (DmlException e) {
-            System.debug(LoggingLevel.ERROR, 'Error updating accounts: ' + e.getMessage());
-            throw e; // Do not swallow exception
-        }
+        
     }
 }
