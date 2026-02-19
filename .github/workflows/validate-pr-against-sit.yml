@@ -297,10 +297,14 @@ jobs:
           else
             # Fallback to orgWideCoverage from summary
             COVERAGE_RAW=$(jq -r '.result.summary.orgWideCoverage // 0' test_results.json 2>/dev/null || echo "0")
-            # Remove % sign if present (Salesforce API sometimes returns "100%" instead of "100")
-            COVERAGE=$(echo "$COVERAGE_RAW" | sed 's/%//g' | tr -d ' ')
+            echo "[DEBUG] Raw coverage from summary: '$COVERAGE_RAW'"
             
-            if [ "$COVERAGE" = "0" ] || [ -z "$COVERAGE" ] || [ "$COVERAGE" = "null" ]; then
+            # Remove % sign and any whitespace immediately
+            COVERAGE=$(echo "$COVERAGE_RAW" | sed 's/%//g' | sed 's/[^0-9.]//g' | tr -d ' ')
+            
+            echo "[DEBUG] Cleaned coverage value: '$COVERAGE'"
+            
+            if [ -z "$COVERAGE" ] || [ "$COVERAGE" = "0" ] || [ "$COVERAGE" = "null" ] || [ "$COVERAGE" = "" ]; then
               echo "[WARN] Could not calculate org-wide coverage from codeCoverage array or summary"
               echo "[INFO] Test results summary:"
               jq '.result.summary' test_results.json 2>/dev/null || cat test_results.json | head -50
@@ -311,14 +315,31 @@ jobs:
             echo "[INFO] Org-wide coverage from summary: $COVERAGE%"
           fi
           
-          # Ensure COVERAGE is a number (remove any non-numeric characters except decimal point)
-          COVERAGE=$(echo "$COVERAGE" | sed 's/[^0-9.]//g')
+          # Final cleanup: Ensure COVERAGE is a valid number (remove any remaining non-numeric characters except decimal point)
+          COVERAGE_CLEAN=$(echo "$COVERAGE" | sed 's/[^0-9.]//g')
           
+          # Validate COVERAGE is a number
+          if ! echo "$COVERAGE_CLEAN" | grep -qE '^[0-9]+\.?[0-9]*$'; then
+            echo "[ERROR] Invalid coverage value: '$COVERAGE' (cleaned: '$COVERAGE_CLEAN')"
+            echo "coverage=N/A" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+          
+          COVERAGE="$COVERAGE_CLEAN"
+          echo "[DEBUG] Final coverage value for comparison: $COVERAGE"
           echo "coverage=$COVERAGE" >> $GITHUB_OUTPUT
           
-          # Validate org-wide coverage > 75%
-          if (( $(echo "$COVERAGE <= 75" | bc -l) )); then
-            echo "[ERROR] Org-wide coverage must be greater than 75% (Current: $COVERAGE%)"
+          # Validate org-wide coverage > 75% using awk (more reliable than bc)
+          COVERAGE_NUM=$(echo "$COVERAGE" | awk '{print $1+0}')
+          
+          if [ -z "$COVERAGE_NUM" ] || ! awk "BEGIN {exit !($COVERAGE_NUM > 0)}"; then
+            echo "[ERROR] Could not parse coverage as number: '$COVERAGE'"
+            exit 1
+          fi
+          
+          # Compare using awk (avoids bc syntax errors)
+          if awk "BEGIN {exit !($COVERAGE_NUM <= 75)}"; then
+            echo "[ERROR] Org-wide coverage must be greater than 75% (Current: $COVERAGE_NUM%)"
             echo "[INFO] Test results summary:"
             jq '.result.summary' test_results.json 2>/dev/null || cat test_results.json | head -50
             
@@ -330,7 +351,7 @@ jobs:
             exit 1
           fi
           
-          echo "[INFO] ✅ Org-wide coverage validation passed: $COVERAGE%"
+          echo "[INFO] ✅ Org-wide coverage validation passed: $COVERAGE_NUM%"
 
       # Step 12: Push Promotional Branch and Create/Update PR (ONLY if all validations pass)
       - name: Push Promotional Branch and Create/Update PR
