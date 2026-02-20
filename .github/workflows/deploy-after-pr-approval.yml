@@ -1,0 +1,298 @@
+name: Deploy to CRM_DevTrial after PR Approval
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    branches:
+      - CRM_DevTrial
+  pull_request_review:
+    types: [submitted]
+
+jobs:
+  check-approval-and-deploy:
+    runs-on: ubuntu-latest
+    # Only run if PR is open and from promotional branch
+    if: |
+      github.event.pull_request.state == 'open' &&
+      startsWith(github.event.pull_request.head.ref, 'promo/')
+    
+    permissions:
+      contents: write
+      pull-requests: write
+      checks: write
+    
+    steps:
+      # Step 1: Checkout repository
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+          ref: ${{ github.event.pull_request.head.ref }}
+      
+      # Step 2: Configure Git
+      - name: Configure Git
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+      # Step 3: Setup Node
+      - uses: actions/setup-node@v3
+        with:
+          node-version: '18'
+
+      # Step 4: Install Salesforce CLI
+      - name: Install Salesforce CLI
+        run: npm install @salesforce/cli --global
+
+      # Step 5: Install sfdx-git-delta
+      - name: Install sfdx git delta
+        run: |
+          echo Y | sfdx plugins:install sfdx-git-delta
+          sfdx plugins
+
+      # Step 6: Check PR Approval Status
+      - name: Check PR Approval Status
+        id: check-approval
+        uses: actions/github-script@v6
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const prNumber = context.payload.pull_request?.number || context.payload.pull_request.number;
+            
+            // Get PR reviews
+            const { data: reviews } = await github.rest.pulls.listReviews({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: prNumber
+            });
+            
+            // Check for approved reviews
+            const approvedReviews = reviews.filter(review => review.state === 'APPROVED');
+            const approvalCount = approvedReviews.length;
+            
+            console.log(`Found ${approvalCount} approval(s) for PR #${prNumber}`);
+            
+            if (approvalCount >= 1) {
+              console.log('✅ PR has required approval(s)');
+              core.setOutput('approved', 'true');
+              core.setOutput('approval_count', approvalCount.toString());
+            } else {
+              console.log('⚠️ PR does not have required approval yet');
+              core.setOutput('approved', 'false');
+              core.setOutput('approval_count', '0');
+            }
+
+      # Step 7: Generate Delta Packages
+      - name: Create delta packages
+        id: delta-generation
+        if: steps.check-approval.outputs.approved == 'true'
+        run: |
+          mkdir -p changed-sources
+          PROMO_BRANCH="${{ github.event.pull_request.head.ref }}"
+          BASE_BRANCH="CRM_DevTrial"
+          
+          echo "[INFO] Comparing $BASE_BRANCH to $PROMO_BRANCH"
+          
+          git fetch origin "$BASE_BRANCH" || git fetch origin main
+          BASE_COMMIT=$(git rev-parse origin/$BASE_BRANCH 2>/dev/null || git rev-parse origin/main)
+          
+          echo "[INFO] Base commit: $BASE_COMMIT"
+          echo "[INFO] Current commit: $(git rev-parse HEAD)"
+          
+          # Generate delta
+          sf sgd source delta \
+            --from "$BASE_COMMIT" \
+            --to "HEAD" \
+            --output "changed-sources" \
+            --generate-delta \
+            --source "force-app" || {
+              echo "[WARN] Delta generation failed or no changes detected"
+              echo "has_changes=false" >> $GITHUB_OUTPUT
+              exit 0
+            }
+          
+          echo "[INFO] Delta generation complete"
+          
+          if [ -d "changed-sources/force-app" ] && [ "$(ls -A changed-sources/force-app 2>/dev/null)" ]; then
+            echo "has_changes=true" >> $GITHUB_OUTPUT
+            echo "[INFO] Changes detected in force-app"
+          else
+            echo "has_changes=false" >> $GITHUB_OUTPUT
+            echo "[INFO] No changes detected in force-app"
+          fi
+
+      # Step 8: Authorize CRM_DevTrial org (JWT)
+      - name: Authorize CRM_DevTrial Org (JWT)
+        if: steps.check-approval.outputs.approved == 'true' && steps.delta-generation.outputs.has_changes == 'true'
+        run: |
+          echo "${{ secrets.SF_JWT_KEY_DEVTRIAL }}" > server.key
+          sf org login jwt \
+            --username "${{ secrets.SF_USERNAME_DEVTRIAL }}" \
+            --jwt-key-file server.key \
+            --client-id "${{ secrets.SF_CLIENT_ID_DEVTRIAL }}" \
+            --instance-url "${{ secrets.SF_INSTANCE_URL_DEVTRIAL }}" \
+            --set-default \
+            --alias CRM_DevTrial
+
+      # Step 9: Deploy Delta Changes to CRM_DevTrial
+      - name: Deploy Delta Changes to CRM_DevTrial
+        if: steps.check-approval.outputs.approved == 'true' && steps.delta-generation.outputs.has_changes == 'true'
+        id: deploy-delta
+        run: |
+          echo "[INFO] Deploying delta changes to CRM_DevTrial org..."
+          
+          if [ ! -d "changed-sources/force-app" ] || [ -z "$(ls -A changed-sources/force-app 2>/dev/null)" ]; then
+            echo "[INFO] No changes to deploy. Skipping deployment."
+            echo "deployment_success=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          
+          # Deploy delta changes
+          sf project deploy start \
+            --source-dir changed-sources/force-app \
+            --target-org CRM_DevTrial \
+            --wait 10 \
+            --json > deploy_results.json || {
+              echo "[ERROR] Deployment failed"
+              cat deploy_results.json
+              echo "deployment_success=false" >> $GITHUB_OUTPUT
+              exit 1
+            }
+          
+          echo "[INFO] ✅ Deployment successful"
+          echo "deployment_success=true" >> $GITHUB_OUTPUT
+          
+          DEPLOY_STATUS=$(jq -r '.status' deploy_results.json 2>/dev/null || echo "unknown")
+          echo "[INFO] Deployment status: $DEPLOY_STATUS"
+
+      # Step 10: Run Apex Tests and Check Org-Wide Coverage
+      - name: Run Apex Tests and Check Org-Wide Coverage
+        if: steps.check-approval.outputs.approved == 'true' && steps.deploy-delta.outputs.deployment_success == 'true'
+        id: apex
+        continue-on-error: false
+        run: |
+          echo "[INFO] Running all local tests to validate org-wide coverage"
+          
+          set +e
+          sf apex run test \
+            --test-level RunLocalTests \
+            --target-org CRM_DevTrial \
+            --code-coverage \
+            --json \
+            --wait 120 > test_results.json 2>&1
+          TEST_EXIT_CODE=$?
+          set -e
+          
+          echo "[INFO] Test execution exit code: $TEST_EXIT_CODE"
+          
+          if [ ! -f test_results.json ] || [ ! -s test_results.json ]; then
+            echo "[ERROR] Test results file is missing or empty"
+            exit 1
+          fi
+          
+          if grep -qi "no.*test.*found\|no.*apex.*test\|no tests in org" test_results.json 2>/dev/null; then
+            echo "[WARN] No tests found in org."
+            cat test_results.json
+            echo "coverage=N/A" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          
+          if [ $TEST_EXIT_CODE -ne 0 ]; then
+            echo "[ERROR] Test execution failed with exit code $TEST_EXIT_CODE"
+            cat test_results.json | head -100
+            exit 1
+          fi
+          
+          TEST_STATUS=$(jq -r '.status // "unknown"' test_results.json 2>/dev/null || echo "unknown")
+          echo "[INFO] Test status: $TEST_STATUS"
+          
+          if [ "$TEST_STATUS" != "0" ] && [ "$TEST_STATUS" != "success" ]; then
+            echo "[ERROR] Tests failed. Status: $TEST_STATUS"
+            jq '.result.summary' test_results.json 2>/dev/null || cat test_results.json
+            exit 1
+          fi
+          
+          # Calculate coverage
+          TOTAL_COVERED=$(jq -r '[.result.codeCoverage[]?.numLinesCovered // 0] | add' test_results.json 2>/dev/null || echo "0")
+          TOTAL_UNCOVERED=$(jq -r '[.result.codeCoverage[]?.numLinesUncovered // 0] | add' test_results.json 2>/dev/null || echo "0")
+          TOTAL_LINES=$((TOTAL_COVERED + TOTAL_UNCOVERED))
+          
+          if [ "$TOTAL_LINES" -gt 0 ]; then
+            COVERAGE=$(echo "scale=2; $TOTAL_COVERED * 100 / $TOTAL_LINES" | bc)
+            echo "[INFO] Org-wide coverage: $COVERAGE% (Covered: $TOTAL_COVERED, Total: $TOTAL_LINES)"
+          else
+            COVERAGE_RAW=$(jq -r '.result.summary.orgWideCoverage // 0' test_results.json 2>/dev/null || echo "0")
+            COVERAGE=$(echo "$COVERAGE_RAW" | sed 's/%//g' | sed 's/[^0-9.]//g' | tr -d ' ')
+            
+            if [ -z "$COVERAGE" ] || [ "$COVERAGE" = "0" ] || [ "$COVERAGE" = "null" ]; then
+              echo "[WARN] Could not calculate org-wide coverage"
+              echo "coverage=N/A" >> $GITHUB_OUTPUT
+              exit 0
+            fi
+            echo "[INFO] Org-wide coverage from summary: $COVERAGE%"
+          fi
+          
+          COVERAGE_CLEAN=$(echo "$COVERAGE" | sed 's/[^0-9.]//g')
+          COVERAGE_NUM=$(echo "$COVERAGE_CLEAN" | awk '{print $1+0}')
+          
+          echo "coverage=$COVERAGE_NUM" >> $GITHUB_OUTPUT
+          
+          if awk "BEGIN {exit !($COVERAGE_NUM <= 75)}"; then
+            echo "[ERROR] Org-wide coverage must be greater than 75% (Current: $COVERAGE_NUM%)"
+            jq '.result.summary' test_results.json 2>/dev/null || cat test_results.json | head -50
+            exit 1
+          fi
+          
+          echo "[INFO] ✅ Org-wide coverage validation passed: $COVERAGE_NUM%"
+
+      # Step 11: Comment on PR
+      - name: Comment on PR
+        if: always()
+        uses: actions/github-script@v6
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const prNumber = context.payload.pull_request?.number || context.payload.pull_request.number;
+            const approved = '${{ steps.check-approval.outputs.approved }}' === 'true';
+            const approvalCount = '${{ steps.check-approval.outputs.approval_count }}';
+            const deploymentSuccess = '${{ steps.deploy-delta.outputs.deployment_success }}' === 'true';
+            const coverage = '${{ steps.apex.outputs.coverage }}';
+            const jobStatus = '${{ job.status }}';
+            
+            let comment = `## Deployment Status\n\n`;
+            
+            if (!approved) {
+              comment += `⚠️ **Status:** Waiting for peer review approval (Required: 1 approval)\n`;
+              comment += `Current approvals: ${approvalCount}\n`;
+            } else if (jobStatus === 'success' && deploymentSuccess) {
+              comment += `✅ **Status:** Deployment successful\n`;
+              comment += `**Approvals:** ${approvalCount}\n`;
+              comment += `**Org-Wide Coverage:** ${coverage}%\n`;
+              comment += `✅ Changes deployed to CRM_DevTrial\n`;
+              comment += `✅ Tests passed\n`;
+            } else if (jobStatus === 'success' && !deploymentSuccess) {
+              comment += `ℹ️ **Status:** No changes to deploy\n`;
+            } else {
+              comment += `❌ **Status:** Deployment failed\n`;
+              comment += `Please check the workflow logs for details.\n`;
+            }
+            
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: prNumber,
+              body: comment
+            });
+
+      # Step 12: Summary
+      - name: Summary
+        if: always()
+        run: |
+          echo "### Deployment Summary" >> $GITHUB_STEP_SUMMARY
+          echo "**PR:** #${{ github.event.pull_request.number }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Approval Status:** ${{ steps.check-approval.outputs.approved }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Approval Count:** ${{ steps.check-approval.outputs.approval_count }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Deployment:** ${{ steps.deploy-delta.outputs.deployment_success }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Coverage:** ${{ steps.apex.outputs.coverage }}%" >> $GITHUB_STEP_SUMMARY
+          echo "**Status:** ${{ job.status }}" >> $GITHUB_STEP_SUMMARY

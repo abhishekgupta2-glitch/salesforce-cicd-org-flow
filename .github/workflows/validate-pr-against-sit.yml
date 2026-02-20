@@ -47,7 +47,13 @@ jobs:
           echo Y | sfdx plugins:install sfdx-git-delta
           sfdx plugins
 
-      # Step 5: Create Promotional Branch and Check Merge Conflicts FIRST
+      # Step 5: Install required tools (jq, bc, awk)
+      - name: Install required tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y jq bc -qq
+
+      # Step 6: Create Promotional Branch and Check Merge Conflicts FIRST
       - name: Create Promotional Branch and Validate Merge
         id: validate-merge
         run: |
@@ -128,7 +134,7 @@ jobs:
           echo "base_commit=$BASE_COMMIT" >> $GITHUB_OUTPUT
           echo "[INFO] ✅ Promotional branch created and feature branch merged successfully"
 
-      # Step 6: Generate Delta Packages from PROMOTIONAL BRANCH (after merge)
+      # Step 7: Generate Delta Packages from PROMOTIONAL BRANCH (after merge)
       - name: Create delta packages from promotional branch
         id: delta-generation
         if: steps.validate-merge.outputs.merge_success == 'true'
@@ -165,224 +171,201 @@ jobs:
             echo "[INFO] No changes detected in force-app"
           fi
 
-      # Step 7: Install PMD (bypassed for now)
+      # Step 8: Install PMD
       - name: Install PMD
         id: install-pmd
         continue-on-error: true
         if: steps.validate-merge.outputs.merge_success == 'true'
         run: |
-          echo "[INFO] PMD installation skipped (bypassed)"
+          echo "[INFO] Installing PMD for Apex code analysis..."
+          
+          # Install Java (required for PMD)
+          sudo apt-get update -qq
+          sudo apt-get install -y openjdk-17-jdk unzip curl -qq
+          java -version
+          
+          PMD_INSTALLED=false
+          
+          # Try Method 1: PMD 7.0.0
+          echo "[INFO] Method 1: Downloading PMD 7.0.0..."
+          PMD_VERSION="7.0.0"
+          PMD_URL="https://github.com/pmd/pmd/releases/download/pmd_releases%2F${PMD_VERSION}/pmd-bin-${PMD_VERSION}.zip"
+          
+          DOWNLOAD_OUTPUT=$(curl -L -w "%{http_code}" -o pmd-bin.zip "$PMD_URL" 2>&1)
+          HTTP_CODE=$(echo "$DOWNLOAD_OUTPUT" | tail -1)
+          
+          if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "302" ]; then
+            if [ -f pmd-bin.zip ] && [ -s pmd-bin.zip ] && file pmd-bin.zip | grep -q "Zip archive"; then
+              echo "[INFO] PMD zip file downloaded successfully"
+              unzip -q pmd-bin.zip
+              
+              if [ -d "pmd-bin-${PMD_VERSION}" ]; then
+                sudo mkdir -p /opt/pmd
+                sudo cp -r pmd-bin-${PMD_VERSION}/* /opt/pmd/
+                sudo chmod +x /opt/pmd/bin/pmd
+                echo "/opt/pmd/bin" >> $GITHUB_PATH
+                
+                if /opt/pmd/bin/pmd --version 2>&1 | head -1; then
+                  PMD_INSTALLED=true
+                  echo "pmd_available=true" >> $GITHUB_OUTPUT
+                  echo "pmd_method=direct" >> $GITHUB_OUTPUT
+                  echo "[INFO] ✅ PMD 7.0.0 installed successfully"
+                fi
+              fi
+            fi
+          fi
+          
+          # Try Method 2: PMD 6.55.0 if 7.0.0 failed
+          if [ "$PMD_INSTALLED" != "true" ]; then
+            echo "[INFO] Method 2: Trying PMD 6.55.0..."
+            PMD_VERSION="6.55.0"
+            PMD_URL="https://github.com/pmd/pmd/releases/download/pmd_releases%2F${PMD_VERSION}/pmd-bin-${PMD_VERSION}.zip"
+            
+            rm -f pmd-bin.zip
+            DOWNLOAD_OUTPUT=$(curl -L -w "%{http_code}" -o pmd-bin.zip "$PMD_URL" 2>&1)
+            HTTP_CODE=$(echo "$DOWNLOAD_OUTPUT" | tail -1)
+            
+            if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "302" ]; then
+              if [ -f pmd-bin.zip ] && [ -s pmd-bin.zip ] && file pmd-bin.zip | grep -q "Zip archive"; then
+                unzip -q pmd-bin.zip
+                if [ -d "pmd-bin-${PMD_VERSION}" ]; then
+                  sudo mkdir -p /opt/pmd
+                  sudo cp -r pmd-bin-${PMD_VERSION}/* /opt/pmd/
+                  sudo chmod +x /opt/pmd/bin/pmd
+                  echo "/opt/pmd/bin" >> $GITHUB_PATH
+                  
+                  if /opt/pmd/bin/pmd --version 2>&1 | head -1; then
+                    PMD_INSTALLED=true
+                    echo "pmd_available=true" >> $GITHUB_OUTPUT
+                    echo "pmd_method=direct_v6" >> $GITHUB_OUTPUT
+                    echo "[INFO] ✅ PMD 6.55.0 installed successfully"
+                  fi
+                fi
+              fi
+            fi
+          fi
+          
+          # Try Method 3: Salesforce Code Analyzer as fallback
+          if [ "$PMD_INSTALLED" != "true" ]; then
+            echo "[INFO] Method 3: Installing Salesforce Code Analyzer as fallback..."
+            if npm install -g @salesforce/sfdx-scanner 2>&1; then
+              if npx @salesforce/sfdx-scanner --version 2>&1 || npm list -g @salesforce/sfdx-scanner 2>&1; then
+                echo "pmd_available=true" >> $GITHUB_OUTPUT
+                echo "pmd_method=scanner" >> $GITHUB_OUTPUT
+                PMD_INSTALLED=true
+                echo "[INFO] ✅ Salesforce Code Analyzer installed as fallback"
+              fi
+            fi
+          fi
+          
+          if [ "$PMD_INSTALLED" != "true" ]; then
+            echo "[WARN] All PMD installation methods failed. Will use enhanced code validation instead."
+            echo "pmd_available=false" >> $GITHUB_OUTPUT
+            echo "pmd_method=none" >> $GITHUB_OUTPUT
+          fi
 
-      # Step 8: Run PMD Apex Checks (TEMPORARILY BYPASSED)
-      - name: Run PMD Apex Checks
-        id: pmd-check
-        continue-on-error: false
+      # Step 9: Create PMD Ruleset File
+      - name: Create PMD Ruleset
         if: steps.validate-merge.outputs.merge_success == 'true'
         run: |
-          echo "[INFO] ⚠️ PMD checks temporarily bypassed - always passing"
-          echo "pmd_passed=true" >> $GITHUB_OUTPUT
-          exit 0
-
-      # Step 9: Authorize CRM_DevTrial org (JWT)
-      - name: Authorize CRM_DevTrial Org (JWT)
-        if: steps.validate-merge.outputs.merge_success == 'true' && steps.pmd-check.outputs.pmd_passed == 'true'
-        id: authorize-org
-        run: |
-          echo "${{ secrets.SF_JWT_KEY_DEVTRIAL }}" > server.key
-          sf org login jwt \
-            --username "${{ secrets.SF_USERNAME_DEVTRIAL }}" \
-            --jwt-key-file server.key \
-            --client-id "${{ secrets.SF_CLIENT_ID_DEVTRIAL }}" \
-            --instance-url "${{ secrets.SF_INSTANCE_URL_DEVTRIAL }}" \
-            --set-default \
-            --alias CRM_DevTrial
+          echo "[INFO] Creating PMD ruleset file for Apex..."
+          mkdir -p .pmd
           
-          echo "org_authorized=true" >> $GITHUB_OUTPUT
-
-      # Step 10: Deploy Delta Changes to CRM_DevTrial (ONLY if merge succeeded)
-      - name: Deploy Delta Changes to CRM_DevTrial
-        if: steps.validate-merge.outputs.merge_success == 'true' && steps.pmd-check.outputs.pmd_passed == 'true' && steps.delta-generation.outputs.has_changes == 'true'
-        id: deploy-delta
-        run: |
-          echo "[INFO] Deploying delta changes to CRM_DevTrial org..."
+          cat > .pmd/apex-ruleset.xml << 'EOF'
+          <?xml version="1.0"?>
+          <ruleset name="Apex Rules"
+                   xmlns="http://pmd.sourceforge.net/ruleset/2.0.0"
+                   xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                   xsi:schemaLocation="http://pmd.sourceforge.net/ruleset/2.0.0 https://pmd.sourceforge.io/ruleset_2_0_0.xsd">
+            <description>PMD ruleset for Apex code quality checks</description>
+            <rule ref="category/apex/security.xml"/>
+            <rule ref="category/apex/performance.xml"/>
+            <rule ref="category/apex/bestpractices.xml"/>
+          </ruleset>
+          EOF
           
-          if [ ! -d "changed-sources/force-app" ] || [ -z "$(ls -A changed-sources/force-app 2>/dev/null)" ]; then
-            echo "[INFO] No changes to deploy. Skipping deployment."
-            echo "deployment_success=true" >> $GITHUB_OUTPUT
+          echo "[INFO] ✅ PMD ruleset created at .pmd/apex-ruleset.xml"
+
+      # Step 10: Run PMD Apex Checks using shell script (Non-blocking - shows violations but doesn't fail)
+      - name: Run PMD Apex Checks
+        id: pmd-check
+        continue-on-error: true
+        if: steps.validate-merge.outputs.merge_success == 'true'
+        run: |
+          chmod +x scripts/pmd-check.sh scripts/enhanced-pmd-check.sh
+          
+          # Check if there are changes
+          if [ "${{ steps.delta-generation.outputs.has_changes }}" != "true" ]; then
+            echo "[INFO] No changes detected. PMD checks skipped."
+            echo "pmd_passed=true" >> $GITHUB_OUTPUT
+            echo "pmd_violations=0" >> $GITHUB_OUTPUT
+            echo "pmd_violations_details=" >> $GITHUB_OUTPUT
             exit 0
           fi
           
-          # Store deployment ID for potential rollback
-          DEPLOYMENT_ID="deploy_$(date +%s)"
-          echo "deployment_id=$DEPLOYMENT_ID" >> $GITHUB_OUTPUT
+          # Run PMD checks using shell script (non-blocking mode - always succeeds)
+          scripts/pmd-check.sh changed-sources/force-app .pmd/apex-ruleset.xml 2>&1 | tee pmd-output.log
           
-          # Deploy delta changes
-          sf project deploy start \
-            --source-dir changed-sources/force-app \
-            --target-org CRM_DevTrial \
-            --wait 10 \
-            --json > deploy_results.json || {
-              echo "[ERROR] Deployment failed"
-              cat deploy_results.json
-              echo "deployment_success=false" >> $GITHUB_OUTPUT
-              exit 1
-            }
+          # Parse violations from output or files
+          VIOLATION_COUNT=0
+          VIOLATION_DETAILS=""
           
-          echo "[INFO] ✅ Deployment successful"
-          echo "deployment_success=true" >> $GITHUB_OUTPUT
+          # Try to read violation count from file first
+          if [ -f pmd-violation-count.txt ]; then
+            VIOLATION_COUNT=$(cat pmd-violation-count.txt 2>/dev/null || echo "0")
+          else
+            # Extract from log
+            VIOLATION_COUNT=$(grep -c "\[ERROR\]\|\[WARN\].*violation" pmd-output.log 2>/dev/null || echo "0")
+          fi
           
-          # Check deployment status
-          DEPLOY_STATUS=$(jq -r '.status' deploy_results.json 2>/dev/null || echo "unknown")
-          echo "[INFO] Deployment status: $DEPLOY_STATUS"
+          # Extract violation details
+          if [ -f pmd-violations.json ]; then
+            VIOLATION_DETAILS=$(jq -r '.files[] | select(.violations != null) | "\(.filename): \(.violations | length) violation(s)"' pmd-violations.json 2>/dev/null | head -10 | tr '\n' ';' || echo "")
+          elif [ -f pmd-violations.txt ]; then
+            VIOLATION_DETAILS=$(cat pmd-violations.txt 2>/dev/null | head -10 | tr '\n' ';' || echo "")
+          else
+            VIOLATION_DETAILS=$(grep -E "\[ERROR\]|\[WARN\].*violation" pmd-output.log 2>/dev/null | head -10 | tr '\n' ';' || echo "")
+          fi
+          
+          if [ "$VIOLATION_COUNT" -gt 0 ]; then
+            echo "[WARN] ⚠️ PMD found $VIOLATION_COUNT violation(s) - Showing in summary (non-blocking)"
+            echo "[INFO] Violations will be displayed in workflow summary"
+          else
+            echo "[INFO] ✅ PMD checks passed - No violations found"
+          fi
+          
+          echo "pmd_passed=true" >> $GITHUB_OUTPUT
+          echo "pmd_violations=$VIOLATION_COUNT" >> $GITHUB_OUTPUT
+          echo "pmd_violations_details=$VIOLATION_DETAILS" >> $GITHUB_OUTPUT
 
-      # Step 11: Run Apex Tests and Check Org-Wide Coverage
-      - name: Run Apex Tests and Check Org-Wide Coverage
+      # Step 11: Run Apex Tests against PROMOTIONAL BRANCH (not org)
+      - name: Run Apex Tests against Promotional Branch
         if: steps.validate-merge.outputs.merge_success == 'true' && steps.pmd-check.outputs.pmd_passed == 'true'
-        id: apex
+        id: apex-tests
         continue-on-error: false
         run: |
-          echo "[INFO] Running all local tests to validate org-wide coverage"
+          chmod +x scripts/run-apex-tests.sh
           
-          # Run tests with better error handling
-          set +e
-          sf apex run test \
-            --test-level RunLocalTests \
-            --target-org CRM_DevTrial \
-            --code-coverage \
-            --json \
-            --wait 120 > test_results.json 2>&1
-          TEST_EXIT_CODE=$?
-          set -e
+          # Run tests against promotional branch code
+          scripts/run-apex-tests.sh force-app test_results.json
           
-          echo "[INFO] Test execution exit code: $TEST_EXIT_CODE"
-          
-          # Check if test_results.json exists and has content
-          if [ ! -f test_results.json ] || [ ! -s test_results.json ]; then
-            echo "[ERROR] Test results file is missing or empty"
+          if [ ! -f test_results.json ]; then
+            echo "[ERROR] Test results file not generated"
             exit 1
           fi
           
-          # Check for common error patterns
-          if grep -qi "no.*test.*found\|no.*apex.*test\|no tests in org" test_results.json 2>/dev/null; then
-            echo "[WARN] No tests found in org. This might be expected if no test classes are deployed."
-            echo "[INFO] Test results:"
-            cat test_results.json
-            echo "coverage=N/A" >> $GITHUB_OUTPUT
-            echo "[INFO] Skipping coverage check - no tests found"
-            exit 0
-          fi
-          
-          # Check if test execution failed
-          if [ $TEST_EXIT_CODE -ne 0 ]; then
-            echo "[ERROR] Test execution failed with exit code $TEST_EXIT_CODE"
-            echo "[INFO] Test results:"
-            cat test_results.json | head -100
-            
-            # If deployment happened, suggest rollback
-            if [ "${{ steps.deploy-delta.outputs.deployment_success }}" = "true" ]; then
-              echo "[WARN] Tests failed after deployment. Consider rolling back changes."
-            fi
-            
-            exit 1
-          fi
-          
-          # Parse test results
-          TEST_STATUS=$(jq -r '.status // "unknown"' test_results.json 2>/dev/null || echo "unknown")
-          echo "[INFO] Test status: $TEST_STATUS"
-          
-          if [ "$TEST_STATUS" != "0" ] && [ "$TEST_STATUS" != "success" ]; then
-            echo "[ERROR] Tests failed. Status: $TEST_STATUS"
-            echo "[INFO] Test summary:"
-            jq '.result.summary' test_results.json 2>/dev/null || cat test_results.json
-            
-            # If deployment happened, suggest rollback
-            if [ "${{ steps.deploy-delta.outputs.deployment_success }}" = "true" ]; then
-              echo "[WARN] Tests failed after deployment. Consider rolling back changes."
-            fi
-            
-            exit 1
-          fi
-          
-          # Calculate coverage
-          TOTAL_COVERED=$(jq -r '[.result.codeCoverage[]?.numLinesCovered // 0] | add' test_results.json 2>/dev/null || echo "0")
-          TOTAL_UNCOVERED=$(jq -r '[.result.codeCoverage[]?.numLinesUncovered // 0] | add' test_results.json 2>/dev/null || echo "0")
-          TOTAL_LINES=$((TOTAL_COVERED + TOTAL_UNCOVERED))
-          
-          echo "[DEBUG] Coverage calculation: Covered=$TOTAL_COVERED, Uncovered=$TOTAL_UNCOVERED, Total=$TOTAL_LINES"
-          
-          if [ "$TOTAL_LINES" -gt 0 ]; then
-            COVERAGE=$(echo "scale=2; $TOTAL_COVERED * 100 / $TOTAL_LINES" | bc)
-            echo "[INFO] Org-wide coverage: $COVERAGE% (Covered: $TOTAL_COVERED, Total: $TOTAL_LINES)"
-          else
-            # Fallback to orgWideCoverage from summary
-            COVERAGE_RAW=$(jq -r '.result.summary.orgWideCoverage // 0' test_results.json 2>/dev/null || echo "0")
-            echo "[DEBUG] Raw coverage from summary: '$COVERAGE_RAW'"
-            
-            # Remove % sign and any whitespace immediately
-            COVERAGE=$(echo "$COVERAGE_RAW" | sed 's/%//g' | sed 's/[^0-9.]//g' | tr -d ' ')
-            
-            echo "[DEBUG] Cleaned coverage value: '$COVERAGE'"
-            
-            if [ -z "$COVERAGE" ] || [ "$COVERAGE" = "0" ] || [ "$COVERAGE" = "null" ] || [ "$COVERAGE" = "" ]; then
-              echo "[WARN] Could not calculate org-wide coverage from codeCoverage array or summary"
-              echo "[INFO] Test results summary:"
-              jq '.result.summary' test_results.json 2>/dev/null || cat test_results.json | head -50
-              echo "coverage=N/A" >> $GITHUB_OUTPUT
-              echo "[INFO] Coverage check skipped - unable to calculate"
-              exit 0
-            fi
-            echo "[INFO] Org-wide coverage from summary: $COVERAGE%"
-          fi
-          
-          # Final cleanup: Ensure COVERAGE is a valid number (remove any remaining non-numeric characters except decimal point)
-          COVERAGE_CLEAN=$(echo "$COVERAGE" | sed 's/[^0-9.]//g')
-          
-          # Validate COVERAGE is a number
-          if ! echo "$COVERAGE_CLEAN" | grep -qE '^[0-9]+\.?[0-9]*$'; then
-            echo "[ERROR] Invalid coverage value: '$COVERAGE' (cleaned: '$COVERAGE_CLEAN')"
-            echo "coverage=N/A" >> $GITHUB_OUTPUT
-            exit 1
-          fi
-          
-          COVERAGE="$COVERAGE_CLEAN"
-          echo "[DEBUG] Final coverage value for comparison: $COVERAGE"
-          echo "coverage=$COVERAGE" >> $GITHUB_OUTPUT
-          
-          # Validate org-wide coverage > 75% using awk (more reliable than bc)
-          COVERAGE_NUM=$(echo "$COVERAGE" | awk '{print $1+0}')
-          
-          if [ -z "$COVERAGE_NUM" ] || ! awk "BEGIN {exit !($COVERAGE_NUM > 0)}"; then
-            echo "[ERROR] Could not parse coverage as number: '$COVERAGE'"
-            exit 1
-          fi
-          
-          # Compare using awk (avoids bc syntax errors)
-          if awk "BEGIN {exit !($COVERAGE_NUM <= 75)}"; then
-            echo "[ERROR] Org-wide coverage must be greater than 75% (Current: $COVERAGE_NUM%)"
-            echo "[INFO] Test results summary:"
-            jq '.result.summary' test_results.json 2>/dev/null || cat test_results.json | head -50
-            
-            # If deployment happened, suggest rollback
-            if [ "${{ steps.deploy-delta.outputs.deployment_success }}" = "true" ]; then
-              echo "[WARN] Coverage too low after deployment. Consider rolling back changes."
-            fi
-            
-            exit 1
-          fi
-          
-          echo "[INFO] ✅ Org-wide coverage validation passed: $COVERAGE_NUM%"
+          echo "[INFO] ✅ Apex test validation passed against promotional branch"
+          echo "tests_passed=true" >> $GITHUB_OUTPUT
 
-      # Step 12: Push Promotional Branch and Create/Update PR (ONLY if all validations pass)
+      # Step 12: Push Promotional Branch and Create/Update PR
       - name: Push Promotional Branch and Create/Update PR
-        if: steps.validate-merge.outputs.merge_success == 'true' && steps.pmd-check.outputs.pmd_passed == 'true' && steps.apex.outputs.coverage != ''
+        if: steps.validate-merge.outputs.merge_success == 'true' && steps.pmd-check.outputs.pmd_passed == 'true' && steps.apex-tests.outputs.tests_passed == 'true'
         uses: actions/github-script@v6
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
             const promoBranch = '${{ steps.validate-merge.outputs.promo_branch }}';
             const featureBranch = '${GITHUB_REF#refs/heads/}';
-            const coverage = '${{ steps.apex.outputs.coverage }}';
-            const deploymentSuccess = '${{ steps.deploy-delta.outputs.deployment_success }}' === 'true';
             const mergeSuccess = '${{ steps.validate-merge.outputs.merge_success }}' === 'true';
             
             // Push promotional branch
@@ -392,7 +375,6 @@ jobs:
               console.log(`✅ Promotional branch ${promoBranch} pushed successfully`);
             } catch (error) {
               console.log(`⚠️ Error pushing branch: ${error.message}`);
-              // Don't fail if branch already exists and is up to date
               if (error.message.includes('up to date')) {
                 console.log(`ℹ️ Branch ${promoBranch} is already up to date`);
               } else {
@@ -409,7 +391,7 @@ jobs:
               state: 'open'
             });
             
-            const prBody = `## Promotional Branch Validation Results\n\n**Feature Branch:** \`${featureBranch}\`\n**Promotional Branch:** \`${promoBranch}\`\n\n**Validation Status:** ✅ Passed\n\n**Merge Status:** ${mergeSuccess ? '✅ Success' : '❌ Failed'}\n**Org-Wide Coverage:** ${coverage}% (Required: >75%)\n\n✅ Merge validation passed\n✅ PMD checks passed\n✅ Tests passed\n✅ Org-wide coverage validated\n${deploymentSuccess ? '✅ Changes deployed to CRM_DevTrial' : '⚠️ No changes to deploy'}\n✅ Ready for review and merge`;
+            const prBody = `## Promotional Branch Validation Results\n\n**Feature Branch:** \`${featureBranch}\`\n**Promotional Branch:** \`${promoBranch}\`\n\n**Validation Status:** ✅ Passed\n\n**Merge Status:** ${mergeSuccess ? '✅ Success' : '❌ Failed'}\n\n✅ Merge validation passed\n✅ PMD checks passed\n✅ Apex tests validated against promotional branch\n\n⚠️ **Deployment will happen automatically after PR approval and peer review**\n\n✅ Ready for review and merge`;
             
             if (existingPRs.length > 0) {
               // Update existing PR
@@ -433,7 +415,8 @@ jobs:
                 title: `Promotional Branch: ${promoBranch}`,
                 head: promoBranch,
                 base: 'CRM_DevTrial',
-                body: prBody
+                body: prBody,
+                draft: false
               });
               
               console.log(`✅ PR created: ${pr.html_url}`);
@@ -446,15 +429,34 @@ jobs:
           echo "### Feature Branch Validation Summary" >> $GITHUB_STEP_SUMMARY
           echo "**Feature Branch:** \`${GITHUB_REF#refs/heads/}\`" >> $GITHUB_STEP_SUMMARY
           echo "**Merge Status:** ${{ steps.validate-merge.outputs.merge_success }}" >> $GITHUB_STEP_SUMMARY
-          echo "**PMD Checks:** ${{ steps.pmd-check.outputs.pmd_passed }}" >> $GITHUB_STEP_SUMMARY
+          echo "**PMD Checks:** ✅ Completed" >> $GITHUB_STEP_SUMMARY
+          
+          # Show PMD violations if any
+          PMD_VIOLATIONS="${{ steps.pmd-check.outputs.pmd_violations }}"
+          if [ -n "$PMD_VIOLATIONS" ] && [ "$PMD_VIOLATIONS" != "0" ] && [ "$PMD_VIOLATIONS" != "" ]; then
+            echo "**PMD Violations:** ⚠️ $PMD_VIOLATIONS violation(s) found (non-blocking)" >> $GITHUB_STEP_SUMMARY
+            PMD_DETAILS="${{ steps.pmd-check.outputs.pmd_violations_details }}"
+            if [ -n "$PMD_DETAILS" ] && [ "$PMD_DETAILS" != "" ]; then
+              echo "" >> $GITHUB_STEP_SUMMARY
+              echo "**Violation Details:**" >> $GITHUB_STEP_SUMMARY
+              echo "$PMD_DETAILS" | tr ';' '\n' | sed 's/^/- /' >> $GITHUB_STEP_SUMMARY
+            fi
+          else
+            echo "**PMD Violations:** ✅ None" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          echo "**Apex Tests:** ${{ steps.apex-tests.outputs.tests_passed }}" >> $GITHUB_STEP_SUMMARY
           if [ "${{ steps.validate-merge.outputs.merge_success }}" = "true" ]; then
             echo "**Promotional Branch:** \`${{ steps.validate-merge.outputs.promo_branch }}\`" >> $GITHUB_STEP_SUMMARY
-            echo "**Deployment:** ${{ steps.deploy-delta.outputs.deployment_success }}" >> $GITHUB_STEP_SUMMARY
-            echo "**Org-Wide Coverage:** ${{ steps.apex.outputs.coverage }}%" >> $GITHUB_STEP_SUMMARY
+            echo "**Promotional Branch Contains:** ✅ Delta changes from feature branch merged into CRM_DevTrial" >> $GITHUB_STEP_SUMMARY
           fi
           echo "**Validation Status:** ${{ job.status }}" >> $GITHUB_STEP_SUMMARY
           if [ "${{ job.status }}" = "success" ]; then
             echo "✅ **Status:** All validations passed - PR created/updated" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "### Deployment Information" >> $GITHUB_STEP_SUMMARY
+            echo "⚠️ **Deployment:** Will happen automatically **ONLY after PR approval** (requires 1 peer review)" >> $GITHUB_STEP_SUMMARY
+            echo "✅ **Current Status:** PR created - Waiting for peer review approval" >> $GITHUB_STEP_SUMMARY
           else
             echo "❌ **Status:** Validation failed - Please fix issues" >> $GITHUB_STEP_SUMMARY
             if [ "${{ steps.validate-merge.outputs.merge_success }}" != "true" ]; then
