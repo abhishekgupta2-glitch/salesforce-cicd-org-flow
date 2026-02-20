@@ -480,8 +480,8 @@ jobs:
           
           echo "[INFO] ✅ Org-wide coverage validation passed: $COVERAGE_NUM%"
 
-      # Step 12: Send Email Notification
-      - name: Send Email Notification
+      # Step 12: Comment on PR
+      - name: Comment on PR
         if: always()
         uses: actions/github-script@v6
         with:
@@ -492,58 +492,21 @@ jobs:
             const deploymentSuccess = '${{ steps.deploy-delta-sit.outputs.deployment_success }}' === 'true';
             const coverage = '${{ steps.apex-sit.outputs.coverage }}';
             const jobStatus = '${{ job.status }}';
-            const mergeCommit = '${{ github.event.pull_request.merge_commit_sha }}';
-            const sitPromoBranch = '${{ github.event.pull_request.head.ref }}';
             
-            // Get PR details
-            const { data: pr } = await github.rest.pulls.get({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              pull_number: prNumber
-            });
+            let comment = `## SIT Deployment Status\n\n`;
             
-            // Prepare email content
-            const emailSubject = `SIT Deployment ${jobStatus === 'success' ? 'Successful' : 'Failed'} - PR #${prNumber}`;
-            
-            const successMessage = jobStatus === 'success' && deploymentSuccess
-              ? '✅ All validations passed\n✅ Changes deployed to CRM_SITOrg\n✅ Tests passed\n✅ Coverage requirement met (>75%)'
-              : `❌ Deployment failed or validation errors occurred\nPlease check the workflow logs for details:\n${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
-            
-            const emailBody = `SIT Environment Deployment Summary
-==================================
-
-PR Details:
------------
-PR Number: #${prNumber}
-PR Title: ${pr.title}
-SIT Promotional Branch: ${sitPromoBranch}
-Merge Commit: ${mergeCommit}
-Merged By: ${mergedBy}
-Merged At: ${pr.merged_at}
-
-Deployment Status:
-------------------
-Status: ${jobStatus === 'success' ? '✅ SUCCESS' : '❌ FAILED'}
-Deployment: ${deploymentSuccess ? '✅ Successful' : '❌ Failed'}
-Org-Wide Coverage: ${coverage}%
-
-${successMessage}
-
-Workflow Information:
---------------------
-Repository: ${context.repo.owner}/${context.repo.repo}
-Workflow: ${context.workflow}
-Run ID: ${context.runId}
-Run URL: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}
-
----
-This is an automated message from GitHub Actions.`;
-            
-            // Send email using GitHub API (create issue comment as fallback if email not configured)
-            // Note: For actual email, you'll need to use a service like SendGrid, AWS SES, etc.
-            // This creates a comment on the PR as a notification
-            
-            const comment = `## 📧 Deployment Summary Email\n\n${emailBody.replace(/\n/g, '\n')}\n\n**Note:** To receive email notifications, configure an email service in the workflow.`;
+            if (jobStatus === 'success' && deploymentSuccess) {
+              comment += `✅ **Status:** Deployment successful\n`;
+              comment += `**Merged by:** @${mergedBy}\n`;
+              comment += `**Org-Wide Coverage:** ${coverage}%\n`;
+              comment += `✅ Changes deployed to CRM_SITOrg\n`;
+              comment += `✅ Tests passed\n`;
+            } else if (jobStatus === 'success' && !deploymentSuccess) {
+              comment += `ℹ️ **Status:** No changes to deploy\n`;
+            } else {
+              comment += `❌ **Status:** Deployment failed\n`;
+              comment += `Please check the workflow logs for details.\n`;
+            }
             
             await github.rest.issues.createComment({
               owner: context.repo.owner,
@@ -551,9 +514,6 @@ This is an automated message from GitHub Actions.`;
               issue_number: prNumber,
               body: comment
             });
-            
-            console.log('✅ Deployment summary posted to PR');
-            console.log('📧 Email notification prepared (configure email service to send)');
 
       # Step 13: Summary
       - name: Summary
