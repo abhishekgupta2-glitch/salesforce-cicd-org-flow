@@ -6,6 +6,10 @@ certs
 .forceignore
 
 #Logs & Other files
-scripts/*
+# Shell scripts in scripts/ directory are tracked (needed for workflows)
+# Ignore only log/temp files in scripts directory
+scripts/*.log
+scripts/*.tmp
+scripts/*.bak
 .log
 .DS_Store
