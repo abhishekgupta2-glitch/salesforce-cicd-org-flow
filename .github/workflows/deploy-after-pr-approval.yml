@@ -90,7 +90,7 @@ jobs:
         run: |
           mkdir -p changed-sources
           PROMO_BRANCH="${{ github.event.pull_request.head.ref }}"
-          BASE_BRANCH="CRM_DevTrial"
+          BASE_BRANCH="CRM_DevTrial2"
           
           echo "[INFO] Comparing $BASE_BRANCH to $PROMO_BRANCH"
           
