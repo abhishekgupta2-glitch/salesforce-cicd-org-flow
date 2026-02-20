@@ -64,9 +64,10 @@ jobs:
           echo "[INFO] Feature branch: $FEATURE_BRANCH"
           echo "[INFO] Creating promotional branch: $PROMO_BRANCH"
           
-          # Fetch all branches
+          # Fetch all branches including promotional branch if it exists
           git fetch origin CRM_DevTrial2 || git fetch origin main
           git fetch origin "$FEATURE_BRANCH"
+          git fetch origin "$PROMO_BRANCH" 2>/dev/null || echo "[INFO] Promotional branch doesn't exist remotely yet"
           
           BASE_BRANCH="CRM_DevTrial2"
           BASE_COMMIT=$(git rev-parse origin/$BASE_BRANCH 2>/dev/null || git rev-parse origin/main)
@@ -77,13 +78,15 @@ jobs:
           
           # Check if promotional branch already exists
           if git ls-remote --heads origin "$PROMO_BRANCH" | grep -q "$PROMO_BRANCH"; then
-            echo "[INFO] Promotional branch already exists"
-            echo "[INFO] Resetting promotional branch to $BASE_BRANCH to ensure clean merge"
-            git checkout -b "$PROMO_BRANCH" origin/$BASE_BRANCH 2>/dev/null || git checkout "$PROMO_BRANCH"
+            echo "[INFO] Promotional branch already exists remotely"
+            echo "[INFO] Checking out existing promotional branch"
+            git checkout -b "$PROMO_BRANCH" "origin/$PROMO_BRANCH" 2>/dev/null || git checkout "$PROMO_BRANCH"
+            echo "[INFO] Current promotional branch commit: $(git rev-parse HEAD)"
+            echo "[INFO] Resetting to base branch to ensure clean merge with latest feature changes"
             git reset --hard origin/$BASE_BRANCH || git reset --hard origin/main
-            echo "[INFO] Promotional branch reset to $BASE_BRANCH"
+            echo "[INFO] Promotional branch reset to $BASE_BRANCH for clean merge"
           else
-            # Create promotional branch from CRM_DevTrial22
+            # Create promotional branch from CRM_DevTrial2
             echo "[INFO] Creating new promotional branch from $BASE_BRANCH"
             git checkout -b "$PROMO_BRANCH" origin/$BASE_BRANCH || git checkout -b "$PROMO_BRANCH" origin/main
           fi
@@ -368,17 +371,44 @@ jobs:
             const featureBranch = '${GITHUB_REF#refs/heads/}';
             const mergeSuccess = '${{ steps.validate-merge.outputs.merge_success }}' === 'true';
             
-            // Push promotional branch
+            // Push promotional branch (handle existing branch with force-with-lease)
             const { execSync } = require('child_process');
             try {
-              execSync(`git push origin ${promoBranch}`, { stdio: 'inherit' });
+              // First, fetch the remote branch to check if it exists
+              try {
+                execSync(`git fetch origin ${promoBranch}`, { stdio: 'pipe' });
+                console.log(`ℹ️ Remote branch ${promoBranch} exists, checking if we need to update`);
+                
+                // Check if local is ahead or diverged
+                const remoteCommit = execSync(`git rev-parse origin/${promoBranch}`, { encoding: 'utf8' }).trim();
+                const localCommit = execSync(`git rev-parse HEAD`, { encoding: 'utf8' }).trim();
+                
+                if (remoteCommit !== localCommit) {
+                  console.log(`ℹ️ Local and remote branches differ. Using force-with-lease to update safely.`);
+                  execSync(`git push --force-with-lease origin ${promoBranch}`, { stdio: 'inherit' });
+                } else {
+                  console.log(`ℹ️ Branch ${promoBranch} is already up to date`);
+                }
+              } catch (fetchError) {
+                // Remote branch doesn't exist, push normally
+                console.log(`ℹ️ Remote branch ${promoBranch} doesn't exist, creating it`);
+                execSync(`git push -u origin ${promoBranch}`, { stdio: 'inherit' });
+              }
               console.log(`✅ Promotional branch ${promoBranch} pushed successfully`);
             } catch (error) {
               console.log(`⚠️ Error pushing branch: ${error.message}`);
-              if (error.message.includes('up to date')) {
+              if (error.message.includes('up to date') || error.message.includes('already exists')) {
                 console.log(`ℹ️ Branch ${promoBranch} is already up to date`);
               } else {
-                throw error;
+                // Last resort: try force-with-lease
+                console.log(`⚠️ Attempting force-with-lease as last resort...`);
+                try {
+                  execSync(`git push --force-with-lease origin ${promoBranch}`, { stdio: 'inherit' });
+                  console.log(`✅ Force push successful`);
+                } catch (forceError) {
+                  console.error(`❌ Force push also failed: ${forceError.message}`);
+                  throw forceError;
+                }
               }
             }
             

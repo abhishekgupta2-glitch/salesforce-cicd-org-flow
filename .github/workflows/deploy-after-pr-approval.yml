@@ -229,8 +229,8 @@ jobs:
           
           echo "[INFO] ✅ Org-wide coverage validation passed: $COVERAGE_NUM%"
 
-      # Step 11: Comment on PR
-      - name: Comment on PR
+      # Step 11: Comment on PR and Send Email Notification
+      - name: Comment on PR and Send Email Notification
         if: always()
         uses: actions/github-script@v6
         with:
@@ -238,15 +238,25 @@ jobs:
           script: |
             const prNumber = context.payload.pull_request?.number || context.payload.pull_request.number;
             const merged = context.payload.pull_request?.merged === true;
+            const mergedBy = context.payload.pull_request?.merged_by?.login || 'Unknown';
             const deploymentSuccess = '${{ steps.deploy-delta.outputs.deployment_success }}' === 'true';
             const coverage = '${{ steps.apex.outputs.coverage }}';
             const jobStatus = '${{ job.status }}';
+            const mergeCommit = context.payload.pull_request?.merge_commit_sha || 'N/A';
+            const promoBranch = context.payload.pull_request?.head?.ref || 'N/A';
+            
+            // Get PR details
+            const { data: pr } = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: prNumber
+            });
             
             let comment = `## Deployment Status\n\n`;
             
             if (merged && jobStatus === 'success' && deploymentSuccess) {
               comment += `✅ **Status:** Deployment successful\n`;
-              comment += `**Merged by:** @${context.payload.pull_request.merged_by.login}\n`;
+              comment += `**Merged by:** @${mergedBy}\n`;
               comment += `**Org-Wide Coverage:** ${coverage}%\n`;
               comment += `✅ Changes deployed to CRM_DevTrial\n`;
               comment += `✅ Tests passed\n`;
@@ -265,6 +275,82 @@ jobs:
               issue_number: prNumber,
               body: comment
             });
+            
+            // Prepare email content
+            const emailSubject = `DevTrial Deployment ${jobStatus === 'success' ? 'Successful' : 'Failed'} - PR #${prNumber}`;
+            const emailBody = `
+DevTrial Environment Deployment Summary
+========================================
+
+PR Details:
+-----------
+PR Number: #${prNumber}
+PR Title: ${pr.title}
+Promotional Branch: ${promoBranch}
+Merge Commit: ${mergeCommit}
+Merged By: ${mergedBy}
+Merged At: ${pr.merged_at}
+
+Deployment Status:
+------------------
+Status: ${jobStatus === 'success' ? '✅ SUCCESS' : '❌ FAILED'}
+Deployment: ${deploymentSuccess ? '✅ Successful' : '❌ Failed'}
+Org-Wide Coverage: ${coverage}%
+
+${jobStatus === 'success' && deploymentSuccess ? `
+✅ All validations passed
+✅ Changes deployed to CRM_DevTrial
+✅ Tests passed
+✅ Coverage requirement met (>75%)
+` : `
+❌ Deployment failed or validation errors occurred
+Please check the workflow logs for details:
+${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}
+`}
+
+Workflow Information:
+--------------------
+Repository: ${context.repo.owner}/${context.repo.repo}
+Workflow: ${context.workflow}
+Run ID: ${context.runId}
+Run URL: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}
+
+---
+This is an automated message from GitHub Actions.
+            `;
+            
+            // Send email using curl to email service (configure EMAIL_API_URL and EMAIL_API_KEY)
+            // Example: SendGrid, AWS SES, or custom email service
+            const emailApiUrl = process.env.EMAIL_API_URL || '${{ secrets.EMAIL_API_URL }}';
+            const emailApiKey = process.env.EMAIL_API_KEY || '${{ secrets.EMAIL_API_KEY }}';
+            const recipientEmail = process.env.RECIPIENT_EMAIL || '${{ secrets.DEPLOYMENT_NOTIFICATION_EMAIL }}';
+            
+            if (emailApiUrl && emailApiKey && recipientEmail && emailApiUrl !== '' && emailApiUrl !== '${{ secrets.EMAIL_API_URL }}') {
+              try {
+                const { execSync } = require('child_process');
+                const emailPayload = JSON.stringify({
+                  to: recipientEmail,
+                  subject: emailSubject,
+                  body: emailBody,
+                  html: emailBody.replace(/\n/g, '<br>')
+                });
+                
+                execSync(`curl -X POST "${emailApiUrl}" \
+                  -H "Authorization: Bearer ${emailApiKey}" \
+                  -H "Content-Type: application/json" \
+                  -d '${emailPayload}'`, { stdio: 'inherit' });
+                
+                console.log(`✅ Email sent to ${recipientEmail}`);
+              } catch (emailError) {
+                console.log(`⚠️ Email sending failed: ${emailError.message}`);
+                console.log('📧 Email content prepared but not sent (check email service configuration)');
+              }
+            } else {
+              console.log('📧 Email notification skipped (email service not configured)');
+              console.log('📧 Email content prepared:');
+              console.log(`Subject: ${emailSubject}`);
+              console.log(`To: ${recipientEmail || 'Not configured'}`);
+            }
 
       # Step 12: Summary
       - name: Summary
