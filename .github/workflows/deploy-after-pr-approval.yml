@@ -1,19 +1,17 @@
-name: Deploy to CRM_DevTrial2 after PR Approval
+name: Deploy to CRM_DevTrial after PR Merge
 
 on:
   pull_request:
-    types: [opened, synchronize, reopened, ready_for_review]
+    types: [closed]
     branches:
       - CRM_DevTrial2
-  pull_request_review:
-    types: [submitted]
 
 jobs:
-  check-approval-and-deploy:
+  deploy-after-merge:
     runs-on: ubuntu-latest
-    # Only run if PR is open and from promotional branch
+    # Only run if PR was merged (not just closed) and from promotional branch
     if: |
-      github.event.pull_request.state == 'open' &&
+      github.event.pull_request.merged == true &&
       startsWith(github.event.pull_request.head.ref, 'promo/')
     
     permissions:
@@ -28,7 +26,8 @@ jobs:
         with:
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
-          ref: ${{ github.event.pull_request.head.ref }}
+          # Use merge commit SHA to ensure we have the merged state
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
       
       # Step 2: Configure Git
       - name: Configure Git
@@ -51,59 +50,43 @@ jobs:
           echo Y | sfdx plugins:install sfdx-git-delta
           sfdx plugins
 
-      # Step 6: Check PR Approval Status
-      - name: Check PR Approval Status
-        id: check-approval
-        uses: actions/github-script@v6
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          script: |
-            const prNumber = context.payload.pull_request?.number || context.payload.pull_request.number;
-            
-            // Get PR reviews
-            const { data: reviews } = await github.rest.pulls.listReviews({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              pull_number: prNumber
-            });
-            
-            // Check for approved reviews
-            const approvedReviews = reviews.filter(review => review.state === 'APPROVED');
-            const approvalCount = approvedReviews.length;
-            
-            console.log(`Found ${approvalCount} approval(s) for PR #${prNumber}`);
-            
-            if (approvalCount >= 1) {
-              console.log('✅ PR has required approval(s)');
-              core.setOutput('approved', 'true');
-              core.setOutput('approval_count', approvalCount.toString());
-            } else {
-              console.log('⚠️ PR does not have required approval yet');
-              core.setOutput('approved', 'false');
-              core.setOutput('approval_count', '0');
-            }
+      # Step 6: Verify PR Merge Status
+      - name: Verify PR Merge Status
+        id: verify-merge
+        run: |
+          echo "[INFO] PR #${{ github.event.pull_request.number }} was merged"
+          echo "[INFO] Merged by: ${{ github.event.pull_request.merged_by.login }}"
+          echo "[INFO] Merge commit: ${{ github.event.pull_request.merge_commit_sha }}"
+          echo "[INFO] Source branch: ${{ github.event.pull_request.head.ref }}"
+          echo "[INFO] Target branch: ${{ github.event.pull_request.base.ref }}"
+          echo "merge_verified=true" >> $GITHUB_OUTPUT
 
       # Step 7: Generate Delta Packages
       - name: Create delta packages
         id: delta-generation
-        if: steps.check-approval.outputs.approved == 'true'
+        if: steps.verify-merge.outputs.merge_verified == 'true'
         run: |
           mkdir -p changed-sources
-          PROMO_BRANCH="${{ github.event.pull_request.head.ref }}"
           BASE_BRANCH="CRM_DevTrial2"
+          MERGE_COMMIT="${{ github.event.pull_request.merge_commit_sha }}"
           
-          echo "[INFO] Comparing $BASE_BRANCH to $PROMO_BRANCH"
+          echo "[INFO] PR was merged - comparing base branch to merge commit"
+          echo "[INFO] Merge commit: $MERGE_COMMIT"
           
+          # Fetch base branch to ensure we have the reference
           git fetch origin "$BASE_BRANCH" || git fetch origin main
-          BASE_COMMIT=$(git rev-parse origin/$BASE_BRANCH 2>/dev/null || git rev-parse origin/main)
           
-          echo "[INFO] Base commit: $BASE_COMMIT"
-          echo "[INFO] Current commit: $(git rev-parse HEAD)"
+          # Get the base commit (parent of merge commit, which is the base branch state before merge)
+          # Merge commit has two parents: first parent is base branch, second is head branch
+          BASE_COMMIT=$(git rev-parse ${MERGE_COMMIT}^1 2>/dev/null || git rev-parse origin/$BASE_BRANCH 2>/dev/null || git rev-parse origin/main)
           
-          # Generate delta
+          echo "[INFO] Base commit (before merge): $BASE_COMMIT"
+          echo "[INFO] Merge commit: $(git rev-parse HEAD)"
+          
+          # Generate delta from base (before merge) to merge commit
           sf sgd source delta \
             --from "$BASE_COMMIT" \
-            --to "HEAD" \
+            --to "$MERGE_COMMIT" \
             --output "changed-sources" \
             --generate-delta \
             --source "force-app" || {
@@ -124,7 +107,7 @@ jobs:
 
       # Step 8: Authorize CRM_DevTrial org (JWT)
       - name: Authorize CRM_DevTrial Org (JWT)
-        if: steps.check-approval.outputs.approved == 'true' && steps.delta-generation.outputs.has_changes == 'true'
+        if: steps.verify-merge.outputs.merge_verified == 'true' && steps.delta-generation.outputs.has_changes == 'true'
         run: |
           echo "${{ secrets.SF_JWT_KEY_DEVTRIAL }}" > server.key
           sf org login jwt \
@@ -137,7 +120,7 @@ jobs:
 
       # Step 9: Deploy Delta Changes to CRM_DevTrial
       - name: Deploy Delta Changes to CRM_DevTrial
-        if: steps.check-approval.outputs.approved == 'true' && steps.delta-generation.outputs.has_changes == 'true'
+        if: steps.verify-merge.outputs.merge_verified == 'true' && steps.delta-generation.outputs.has_changes == 'true'
         id: deploy-delta
         run: |
           echo "[INFO] Deploying delta changes to CRM_DevTrial org..."
@@ -168,7 +151,7 @@ jobs:
 
       # Step 10: Run Apex Tests and Check Org-Wide Coverage
       - name: Run Apex Tests and Check Org-Wide Coverage
-        if: steps.check-approval.outputs.approved == 'true' && steps.deploy-delta.outputs.deployment_success == 'true'
+        if: steps.verify-merge.outputs.merge_verified == 'true' && steps.deploy-delta.outputs.deployment_success == 'true'
         id: apex
         continue-on-error: false
         run: |
@@ -254,28 +237,26 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
             const prNumber = context.payload.pull_request?.number || context.payload.pull_request.number;
-            const approved = '${{ steps.check-approval.outputs.approved }}' === 'true';
-            const approvalCount = '${{ steps.check-approval.outputs.approval_count }}';
+            const merged = context.payload.pull_request?.merged === true;
             const deploymentSuccess = '${{ steps.deploy-delta.outputs.deployment_success }}' === 'true';
             const coverage = '${{ steps.apex.outputs.coverage }}';
             const jobStatus = '${{ job.status }}';
             
             let comment = `## Deployment Status\n\n`;
             
-            if (!approved) {
-              comment += `⚠️ **Status:** Waiting for peer review approval (Required: 1 approval)\n`;
-              comment += `Current approvals: ${approvalCount}\n`;
-            } else if (jobStatus === 'success' && deploymentSuccess) {
+            if (merged && jobStatus === 'success' && deploymentSuccess) {
               comment += `✅ **Status:** Deployment successful\n`;
-              comment += `**Approvals:** ${approvalCount}\n`;
+              comment += `**Merged by:** @${context.payload.pull_request.merged_by.login}\n`;
               comment += `**Org-Wide Coverage:** ${coverage}%\n`;
               comment += `✅ Changes deployed to CRM_DevTrial\n`;
               comment += `✅ Tests passed\n`;
-            } else if (jobStatus === 'success' && !deploymentSuccess) {
+            } else if (merged && jobStatus === 'success' && !deploymentSuccess) {
               comment += `ℹ️ **Status:** No changes to deploy\n`;
-            } else {
+            } else if (merged && jobStatus === 'failure') {
               comment += `❌ **Status:** Deployment failed\n`;
               comment += `Please check the workflow logs for details.\n`;
+            } else {
+              comment += `⚠️ **Status:** Deployment workflow completed with status: ${jobStatus}\n`;
             }
             
             await github.rest.issues.createComment({
@@ -291,8 +272,14 @@ jobs:
         run: |
           echo "### Deployment Summary" >> $GITHUB_STEP_SUMMARY
           echo "**PR:** #${{ github.event.pull_request.number }}" >> $GITHUB_STEP_SUMMARY
-          echo "**Approval Status:** ${{ steps.check-approval.outputs.approved }}" >> $GITHUB_STEP_SUMMARY
-          echo "**Approval Count:** ${{ steps.check-approval.outputs.approval_count }}" >> $GITHUB_STEP_SUMMARY
+          echo "**PR Status:** Merged ✅" >> $GITHUB_STEP_SUMMARY
+          echo "**Merged by:** ${{ github.event.pull_request.merged_by.login }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Merge Commit:** ${{ github.event.pull_request.merge_commit_sha }}" >> $GITHUB_STEP_SUMMARY
           echo "**Deployment:** ${{ steps.deploy-delta.outputs.deployment_success }}" >> $GITHUB_STEP_SUMMARY
           echo "**Coverage:** ${{ steps.apex.outputs.coverage }}%" >> $GITHUB_STEP_SUMMARY
           echo "**Status:** ${{ job.status }}" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ job.status }}" = "success" ]; then
+            echo "✅ **Deployment completed successfully**" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "❌ **Deployment failed - Check logs for details**" >> $GITHUB_STEP_SUMMARY
+          fi
