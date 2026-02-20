@@ -280,36 +280,40 @@ jobs:
             });
             
             // Prepare email content
-            const emailSubject = 'DevTrial Deployment ' + (jobStatus === 'success' ? 'Successful' : 'Failed') + ' - PR #' + prNumber;
-            
-            const successMessage = jobStatus === 'success' && deploymentSuccess
+            const emailSubject = `DevTrial Deployment ${jobStatus === 'success' ? 'Successful' : 'Failed'} - PR #${prNumber}`;
+            const successMessage = jobStatus === 'success' && deploymentSuccess 
               ? '✅ All validations passed\n✅ Changes deployed to CRM_DevTrial\n✅ Tests passed\n✅ Coverage requirement met (>75%)'
-              : '❌ Deployment failed or validation errors occurred\nPlease check the workflow logs for details:\n' + context.serverUrl + '/' + context.repo.owner + '/' + context.repo.repo + '/actions/runs/' + context.runId;
+              : `❌ Deployment failed or validation errors occurred\nPlease check the workflow logs for details:\n${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
             
-            const emailBody = 'DevTrial Environment Deployment Summary\n' +
-              '========================================\n\n' +
-              'PR Details:\n' +
-              '-----------\n' +
-              'PR Number: #' + prNumber + '\n' +
-              'PR Title: ' + pr.title + '\n' +
-              'Promotional Branch: ' + promoBranch + '\n' +
-              'Merge Commit: ' + mergeCommit + '\n' +
-              'Merged By: ' + mergedBy + '\n' +
-              'Merged At: ' + pr.merged_at + '\n\n' +
-              'Deployment Status:\n' +
-              '------------------\n' +
-              'Status: ' + (jobStatus === 'success' ? '✅ SUCCESS' : '❌ FAILED') + '\n' +
-              'Deployment: ' + (deploymentSuccess ? '✅ Successful' : '❌ Failed') + '\n' +
-              'Org-Wide Coverage: ' + coverage + '%\n\n' +
-              successMessage + '\n\n' +
-              'Workflow Information:\n' +
-              '--------------------\n' +
-              'Repository: ' + context.repo.owner + '/' + context.repo.repo + '\n' +
-              'Workflow: ' + context.workflow + '\n' +
-              'Run ID: ' + context.runId + '\n' +
-              'Run URL: ' + context.serverUrl + '/' + context.repo.owner + '/' + context.repo.repo + '/actions/runs/' + context.runId + '\n\n' +
-              '---\n' +
-              'This is an automated message from GitHub Actions.';
+            const emailBody = `DevTrial Environment Deployment Summary
+========================================
+
+PR Details:
+-----------
+PR Number: #${prNumber}
+PR Title: ${pr.title}
+Promotional Branch: ${promoBranch}
+Merge Commit: ${mergeCommit}
+Merged By: ${mergedBy}
+Merged At: ${pr.merged_at}
+
+Deployment Status:
+------------------
+Status: ${jobStatus === 'success' ? '✅ SUCCESS' : '❌ FAILED'}
+Deployment: ${deploymentSuccess ? '✅ Successful' : '❌ Failed'}
+Org-Wide Coverage: ${coverage}%
+
+${successMessage}
+
+Workflow Information:
+--------------------
+Repository: ${context.repo.owner}/${context.repo.repo}
+Workflow: ${context.workflow}
+Run ID: ${context.runId}
+Run URL: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}
+
+---
+This is an automated message from GitHub Actions.`;
             
             // Send email using curl to email service (configure EMAIL_API_URL and EMAIL_API_KEY)
             // Example: SendGrid, AWS SES, or custom email service
