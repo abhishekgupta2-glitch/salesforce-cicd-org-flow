@@ -65,10 +65,10 @@ jobs:
           echo "[INFO] Creating promotional branch: $PROMO_BRANCH"
           
           # Fetch all branches
-          git fetch origin CRM_DevTrial || git fetch origin main
+          git fetch origin CRM_DevTrial2 || git fetch origin main
           git fetch origin "$FEATURE_BRANCH"
           
-          BASE_BRANCH="CRM_DevTrial"
+          BASE_BRANCH="CRM_DevTrial2"
           BASE_COMMIT=$(git rev-parse origin/$BASE_BRANCH 2>/dev/null || git rev-parse origin/main)
           
           echo "[INFO] Base branch: $BASE_BRANCH"
@@ -83,7 +83,7 @@ jobs:
             git reset --hard origin/$BASE_BRANCH || git reset --hard origin/main
             echo "[INFO] Promotional branch reset to $BASE_BRANCH"
           else
-            # Create promotional branch from CRM_DevTrial
+            # Create promotional branch from CRM_DevTrial22
             echo "[INFO] Creating new promotional branch from $BASE_BRANCH"
             git checkout -b "$PROMO_BRANCH" origin/$BASE_BRANCH || git checkout -b "$PROMO_BRANCH" origin/main
           fi
@@ -387,7 +387,7 @@ jobs:
               owner: context.repo.owner,
               repo: context.repo.repo,
               head: `${context.repo.owner}:${promoBranch}`,
-              base: 'CRM_DevTrial',
+              base: 'CRM_DevTrial2',
               state: 'open'
             });
             
@@ -414,7 +414,7 @@ jobs:
                 repo: context.repo.repo,
                 title: `Promotional Branch: ${promoBranch}`,
                 head: promoBranch,
-                base: 'CRM_DevTrial',
+                base: 'CRM_DevTrial2',
                 body: prBody,
                 draft: false
               });
@@ -448,7 +448,7 @@ jobs:
           echo "**Apex Tests:** ${{ steps.apex-tests.outputs.tests_passed }}" >> $GITHUB_STEP_SUMMARY
           if [ "${{ steps.validate-merge.outputs.merge_success }}" = "true" ]; then
             echo "**Promotional Branch:** \`${{ steps.validate-merge.outputs.promo_branch }}\`" >> $GITHUB_STEP_SUMMARY
-            echo "**Promotional Branch Contains:** ✅ Delta changes from feature branch merged into CRM_DevTrial" >> $GITHUB_STEP_SUMMARY
+            echo "**Promotional Branch Contains:** ✅ Delta changes from feature branch merged into CRM_DevTrial2" >> $GITHUB_STEP_SUMMARY
           fi
           echo "**Validation Status:** ${{ job.status }}" >> $GITHUB_STEP_SUMMARY
           if [ "${{ job.status }}" = "success" ]; then
@@ -460,6 +460,6 @@ jobs:
           else
             echo "❌ **Status:** Validation failed - Please fix issues" >> $GITHUB_STEP_SUMMARY
             if [ "${{ steps.validate-merge.outputs.merge_success }}" != "true" ]; then
-              echo "⚠️ **Issue:** Merge conflict detected. Please resolve conflicts between feature branch and CRM_DevTrial" >> $GITHUB_STEP_SUMMARY
+              echo "⚠️ **Issue:** Merge conflict detected. Please resolve conflicts between feature branch and CRM_DevTrial2" >> $GITHUB_STEP_SUMMARY
             fi
           fi
