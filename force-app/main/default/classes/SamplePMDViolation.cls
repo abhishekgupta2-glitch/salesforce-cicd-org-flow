@@ -13,7 +13,7 @@ public with sharing class SamplePMDViolation {
             return;
         }
         
-        // Update Account names+abhjiqwewe
+        // Update Account names+abhjiqweweasas
         for(Account acc : accList) {
             acc.Name = 'Updated Name';
         }
