@@ -14,11 +14,14 @@ jobs:
   promote-to-sit:
     runs-on: ubuntu-latest
     # Only run if PR to CRM_DevTrial2 is merged and from promotional branch
-    # This job creates the SIT promotional branch and PR
+    # SKIP if this is a revert PR (prevents SIT promotion when revert happens)
     if: |
       github.event.pull_request.merged == true &&
       github.event.pull_request.base.ref == 'CRM_DevTrial2' &&
-      startsWith(github.event.pull_request.head.ref, 'promo/')
+      startsWith(github.event.pull_request.head.ref, 'promo/') &&
+      !contains(github.event.pull_request.title, '[AUTO-REVERT]') &&
+      !contains(github.event.pull_request.title, '[AUTO-MERGE] Revert') &&
+      !contains(github.event.pull_request.head.ref, 'revert/')
     
     permissions:
       contents: write
@@ -322,11 +325,15 @@ jobs:
     runs-on: ubuntu-latest
     # IMPORTANT: This job ONLY runs when PR from sit-promo/ branch to CRM_SITTrial is merged
     # It does NOT run when CRM_DevTrial2 PR is merged
+    # SKIP if this is a revert PR (prevents SIT org deployment when revert happens)
     # Sequential flow: CRM_DevTrial2 PR merged → promote-to-sit runs → creates SIT PR → SIT PR merged → deploy-to-sit-org runs
     if: |
       github.event.pull_request.merged == true &&
       github.event.pull_request.base.ref == 'CRM_SITTrial' &&
-      startsWith(github.event.pull_request.head.ref, 'sit-promo/')
+      startsWith(github.event.pull_request.head.ref, 'sit-promo/') &&
+      !contains(github.event.pull_request.title, '[AUTO-REVERT]') &&
+      !contains(github.event.pull_request.title, '[AUTO-MERGE] Revert') &&
+      !contains(github.event.pull_request.head.ref, 'revert/')
     
     permissions:
       contents: write
@@ -734,9 +741,9 @@ jobs:
           echo "[INFO] ✅ Post-deployment verification passed"
           echo "[INFO] ✅ Org-wide coverage maintained: $COVERAGE_NUM%"
 
-      # Step 13b: Create Revert PR if Tests Failed
+      # Step 13b: Create Revert PR if Tests Failed During Deployment
       - name: Create Revert PR if Tests Failed (SIT)
-        if: steps.pre-deploy-validation-sit.outputs.validation_passed == 'false' || steps.pre-deploy-validation-sit.outcome == 'failure' || steps.pre-deploy-validation-sit.outputs.tests_failed == 'true'
+        if: always() && steps.pre-deploy-validation-sit.outcome != 'success' && (steps.pre-deploy-validation-sit.outputs.validation_passed == 'false' || steps.pre-deploy-validation-sit.outputs.tests_failed == 'true' || steps.pre-deploy-validation-sit.outcome == 'failure')
         uses: actions/github-script@v6
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
@@ -822,6 +829,19 @@ jobs:
                   
                   console.log(`✅ Revert PR #${revertPR.number} automatically merged successfully`);
                   console.log(`✅ Changes removed from ${BASE_BRANCH} branch`);
+                  
+                  // Add a label to mark this as a revert PR so SIT org deployment can skip it
+                  try {
+                    await github.rest.issues.addLabels({
+                      owner: context.repo.owner,
+                      repo: context.repo.repo,
+                      issue_number: revertPR.number,
+                      labels: ['auto-revert', 'skip-sit-deployment']
+                    });
+                    console.log(`✅ Added labels to revert PR to prevent SIT org deployment`);
+                  } catch (labelError) {
+                    console.log(`⚠️ Could not add labels: ${labelError.message}`);
+                  }
                 } catch (mergeError) {
                   console.log(`⚠️ Failed to auto-merge revert PR: ${mergeError.message}`);
                   console.log(`⚠️ Please manually merge PR #${revertPR.number}: ${revertPR.html_url}`);
@@ -832,7 +852,7 @@ jobs:
                       owner: context.repo.owner,
                       repo: context.repo.repo,
                       issue_number: revertPR.number,
-                      body: `⚠️ **Auto-merge failed** - Please merge this PR manually to complete the revert.\n\nReason: ${mergeError.message}`
+                      body: `⚠️ **Auto-merge failed** - Please merge this PR manually to complete the revert.\n\nReason: ${mergeError.message}\n\n**IMPORTANT:** After merging, SIT org deployment workflows will be skipped automatically.`
                     });
                   } catch (commentError) {
                     console.log(`⚠️ Could not add comment to PR: ${commentError.message}`);
