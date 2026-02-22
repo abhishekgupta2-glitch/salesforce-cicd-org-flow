@@ -1,4 +1,4 @@
-name: Deploy to CRM_DevTrial after PR Merge
+name: 🚀 Deploy to CRM_DevTrial Org (Dev Branch → Dev Org)
 
 on:
   pull_request:
