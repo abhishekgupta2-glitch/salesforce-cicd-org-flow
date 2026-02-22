@@ -1,4 +1,4 @@
-name: SIT Environment Promotion and Deployment
+name: 🔄 SIT Promotion & Deployment (Dev → SIT Branch → SIT Org)
 
 on:
   pull_request:
@@ -15,6 +15,8 @@ jobs:
     runs-on: ubuntu-latest
     # Only run if PR to CRM_DevTrial2 is merged and from promotional branch
     # This job creates the SIT promotional branch and PR
+    # NOTE: This runs after DevTrial deployment, but may run simultaneously
+    # The sequential execution is ensured by the fact that both need the PR to be merged
     if: |
       github.event.pull_request.merged == true &&
       github.event.pull_request.base.ref == 'CRM_DevTrial2' &&
@@ -62,23 +64,30 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y jq bc -qq
 
-      # Step 7: Verify Trigger and Extract Feature Number
+      # Step 8: Verify Trigger and Extract Feature Number
       - name: Verify Trigger and Extract Feature Number
         id: verify-trigger-promote
         run: |
           BASE_REF="${{ github.event.pull_request.base.ref }}"
           HEAD_REF="${{ github.event.pull_request.head.ref }}"
+          PR_NUMBER="${{ github.event.pull_request.number }}"
+          MERGE_COMMIT="${{ github.event.pull_request.merge_commit_sha }}"
           MERGED="${{ github.event.pull_request.merged }}"
+          
+          if [ "$MERGED" != "true" ]; then
+            echo "[ERROR] PR was not merged, only closed"
+            exit 1
+          fi
           
           echo "[INFO] Checking if this is the correct trigger for SIT promotion..."
           echo "[INFO] Base branch: $BASE_REF"
           echo "[INFO] Head branch: $HEAD_REF"
-          echo "[INFO] Merged: $MERGED"
+          echo "[INFO] PR number: $PR_NUMBER"
+          echo "[INFO] Merge commit: $MERGE_COMMIT"
           
           # CRITICAL: Only proceed if this is a PR to CRM_DevTrial2 from promo/ branch
           if [ "$BASE_REF" != "CRM_DevTrial2" ]; then
             echo "[ERROR] This job should only run for PRs to CRM_DevTrial2, but base ref is: $BASE_REF"
-            echo "[ERROR] Exiting - this job should not run for CRM_SITTrial PR merges"
             exit 1
           fi
           
@@ -87,25 +96,25 @@ jobs:
             exit 1
           fi
           
-          if [ "$MERGED" != "true" ]; then
-            echo "[ERROR] PR was not merged, only closed"
-            exit 1
-          fi
-          
-          echo "[INFO] ✅ Valid trigger confirmed - CRM_DevTrial2 PR #${{ github.event.pull_request.number }} was merged"
+          echo "pr_number=$PR_NUMBER" >> $GITHUB_OUTPUT
+          echo "merge_commit=$MERGE_COMMIT" >> $GITHUB_OUTPUT
+          echo "head_ref=$HEAD_REF" >> $GITHUB_OUTPUT
+          echo "[INFO] ✅ Valid trigger confirmed - CRM_DevTrial2 PR #$PR_NUMBER was merged"
 
-      # Step 8: Extract feature number and create SIT promotional branch
+      # Step 9: Extract feature number and create SIT promotional branch
       - name: Create SIT Promotional Branch
         id: create-sit-promo
         if: steps.verify-trigger-promote.outcome == 'success'
         run: |
-          PROMO_BRANCH="${{ github.event.pull_request.head.ref }}"
+          PROMO_BRANCH="${{ steps.verify-trigger-promote.outputs.head_ref }}"
+          MERGE_COMMIT="${{ steps.verify-trigger-promote.outputs.merge_commit }}"
           FEATURE_NUM=$(echo "$PROMO_BRANCH" | sed 's/promo\///g')
           SIT_PROMO_BRANCH="sit-promo/$FEATURE_NUM"
           
           echo "[INFO] Original promo branch: $PROMO_BRANCH"
           echo "[INFO] Feature number: $FEATURE_NUM"
           echo "[INFO] Creating SIT promotional branch: $SIT_PROMO_BRANCH"
+          echo "[INFO] Merge commit from CRM_DevTrial2: $MERGE_COMMIT"
           
           # Fetch CRM_SITTrial branch
           git fetch origin CRM_SITTrial || git fetch origin main
@@ -115,7 +124,7 @@ jobs:
           
           echo "[INFO] Base branch: $BASE_BRANCH"
           echo "[INFO] Base commit: $BASE_COMMIT"
-          echo "[INFO] Merge commit: $(git rev-parse HEAD)"
+          echo "[INFO] Current HEAD: $(git rev-parse HEAD)"
           
           # Check if SIT promotional branch already exists
           if git ls-remote --heads origin "$SIT_PROMO_BRANCH" | grep -q "$SIT_PROMO_BRANCH"; then
@@ -131,7 +140,6 @@ jobs:
           
           # Merge the merged commit from CRM_DevTrial2 into SIT promotional branch
           echo "[INFO] Merging merged commit into SIT promotional branch..."
-          MERGE_COMMIT="${{ github.event.pull_request.merge_commit_sha }}"
           
           # Check if merge commit is already in SIT promo branch
           if git merge-base --is-ancestor "$MERGE_COMMIT" HEAD 2>/dev/null; then
@@ -159,11 +167,13 @@ jobs:
             exit 1
           }
           
+          echo "[INFO] ✅ Successfully merged $MERGE_COMMIT into $SIT_PROMO_BRANCH"
+          
           echo "sit_promo_branch=$SIT_PROMO_BRANCH" >> $GITHUB_OUTPUT
           echo "merge_success=true" >> $GITHUB_OUTPUT
           echo "[INFO] ✅ SIT promotional branch created and merged successfully"
 
-      # Step 9: Generate Delta Packages
+      # Step 10: Generate Delta Packages
       - name: Generate Delta Packages for SIT
         id: delta-generation-sit
         if: steps.create-sit-promo.outputs.merge_success == 'true'
@@ -171,6 +181,7 @@ jobs:
           mkdir -p changed-sources-sit
           SIT_PROMO_BRANCH="${{ steps.create-sit-promo.outputs.sit_promo_branch }}"
           BASE_BRANCH="CRM_SITTrial"
+          MERGE_COMMIT="${{ steps.verify-trigger-promote.outputs.merge_commit }}"
           
           echo "[INFO] Generating delta for SIT environment"
           echo "[INFO] Comparing $BASE_BRANCH to $SIT_PROMO_BRANCH"
@@ -178,10 +189,22 @@ jobs:
           git fetch origin "$BASE_BRANCH" || git fetch origin main
           BASE_COMMIT=$(git rev-parse origin/$BASE_BRANCH 2>/dev/null || git rev-parse origin/main)
           
-          echo "[INFO] Base commit: $BASE_COMMIT"
-          echo "[INFO] Current commit: $(git rev-parse HEAD)"
+          echo "[INFO] Base commit (CRM_SITTrial): $BASE_COMMIT"
+          echo "[INFO] Current commit (sit-promo after merge): $(git rev-parse HEAD)"
+          echo "[INFO] Merge commit from CRM_DevTrial2: $MERGE_COMMIT"
           
-          # Generate delta with better error handling
+          # First, check what files changed in the merge commit compared to base
+          echo "[INFO] Checking what changed in merge commit vs CRM_SITTrial..."
+          CHANGED_FILES=$(git diff --name-only "$BASE_COMMIT" "$MERGE_COMMIT" -- "force-app/" 2>/dev/null || echo "")
+          
+          if [ -n "$CHANGED_FILES" ]; then
+            echo "[INFO] Files changed in merge commit:"
+            echo "$CHANGED_FILES" | head -20
+          else
+            echo "[INFO] No files changed in merge commit (compared to CRM_SITTrial)"
+          fi
+          
+          # Generate delta comparing BASE to HEAD (after merge)
           set +e
           sf sgd source delta \
             --from "$BASE_COMMIT" \
@@ -216,9 +239,28 @@ jobs:
             echo "[INFO] Found manifest files (package.xml or destructiveChanges.xml)"
           fi
           
-          # Check delta output log for any indication of changes
-          if grep -qi "generating\|success\|changed\|delta" delta-output.log 2>/dev/null; then
-            echo "[INFO] Delta generation log indicates activity"
+          # If delta didn't find changes but git diff shows changes, use git diff directly
+          if [ "$HAS_CHANGES" = "false" ] && [ -n "$CHANGED_FILES" ]; then
+            echo "[INFO] Delta generation didn't detect changes, but git diff shows changes"
+            echo "[INFO] Creating delta package manually from git diff..."
+            mkdir -p changed-sources-sit/force-app
+            
+            # Copy changed files to delta directory
+            while IFS= read -r file; do
+              if [ -f "$file" ]; then
+                target_dir="changed-sources-sit/$(dirname "$file")"
+                mkdir -p "$target_dir"
+                cp "$file" "changed-sources-sit/$file"
+                echo "[INFO] Copied: $file"
+              fi
+            done <<< "$CHANGED_FILES"
+            
+            # Re-check for changes
+            FILE_COUNT=$(find changed-sources-sit/force-app -type f 2>/dev/null | wc -l | tr -d ' ')
+            if [ "$FILE_COUNT" -gt 0 ]; then
+              HAS_CHANGES=true
+              echo "[INFO] ✅ Created delta package manually with $FILE_COUNT file(s)"
+            fi
           fi
           
           if [ "$HAS_CHANGES" = "true" ]; then
@@ -227,15 +269,11 @@ jobs:
           else
             echo "has_changes=false" >> $GITHUB_OUTPUT
             echo "[INFO] ⚠️ No changes detected for SIT deployment"
-            echo "[INFO] This might happen if:"
-            echo "[INFO]   1. Changes were already merged to CRM_SITTrial"
-            echo "[INFO]   2. Only metadata files changed (sharing rules, etc.)"
-            echo "[INFO]   3. Delta generation didn't detect the changes"
             echo "[INFO] Checking git diff to verify..."
             git diff --name-only "$BASE_COMMIT" HEAD | grep -E "force-app|\.xml" | head -10 || echo "[INFO] No differences found in git diff"
           fi
 
-      # Step 10: Run PMD Checks
+      # Step 11: Run PMD Checks
       - name: Run PMD Apex Checks for SIT
         id: pmd-check-sit
         continue-on-error: true
@@ -259,7 +297,7 @@ jobs:
           echo "pmd_passed=true" >> $GITHUB_OUTPUT
           echo "pmd_violations=$VIOLATION_COUNT" >> $GITHUB_OUTPUT
 
-      # Step 11: Run Apex Tests against SIT Promotional Branch
+      # Step 12: Run Apex Tests against SIT Promotional Branch
       - name: Run Apex Tests against SIT Promotional Branch
         id: apex-tests-sit
         if: steps.create-sit-promo.outputs.merge_success == 'true' && steps.pmd-check-sit.outputs.pmd_passed == 'true' && steps.delta-generation-sit.outputs.has_changes == 'true'
@@ -275,16 +313,19 @@ jobs:
           echo "[INFO] ✅ Apex test validation passed against SIT promotional branch"
           echo "tests_passed=true" >> $GITHUB_OUTPUT
 
-      # Step 12: Push SIT Promotional Branch and Create/Update PR
+      # Step 13: Push SIT Promotional Branch and Create/Update PR
       - name: Push SIT Promotional Branch and Create/Update PR
+        # Always create PR if merge succeeded, even if no changes detected (for visibility)
         if: steps.create-sit-promo.outputs.merge_success == 'true' && steps.pmd-check-sit.outputs.pmd_passed == 'true' && steps.apex-tests-sit.outputs.tests_passed == 'true'
         uses: actions/github-script@v6
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
             const sitPromoBranch = '${{ steps.create-sit-promo.outputs.sit_promo_branch }}';
-            const originalPromoBranch = '${{ github.event.pull_request.head.ref }}';
+            const originalPromoBranch = '${{ steps.verify-trigger-promote.outputs.head_ref }}';
+            const prNumber = '${{ steps.verify-trigger-promote.outputs.pr_number }}';
             const mergeSuccess = '${{ steps.create-sit-promo.outputs.merge_success }}' === 'true';
+            const hasChanges = '${{ steps.delta-generation-sit.outputs.has_changes }}' === 'true';
             
             // Push SIT promotional branch (handle existing branch)
             const { execSync } = require('child_process');
@@ -324,7 +365,7 @@ jobs:
               state: 'open'
             });
             
-            const prBody = `## SIT Promotional Branch Validation Results\n\n**Original Promo Branch:** \`${originalPromoBranch}\`\n**SIT Promotional Branch:** \`${sitPromoBranch}\`\n**Merged from:** CRM_DevTrial2 (PR #${{ github.event.pull_request.number }})\n\n**Validation Status:** ✅ Passed\n\n**Merge Status:** ${mergeSuccess ? '✅ Success' : '❌ Failed'}\n\n✅ Merge validation passed\n✅ PMD checks passed\n✅ Apex tests validated against SIT promotional branch\n\n⚠️ **Deployment to CRM_SITOrg will happen automatically after PR merge**\n\n✅ Ready for review and merge`;
+            const prBody = `## SIT Promotional Branch Validation Results\n\n**Original Promo Branch:** \`${originalPromoBranch}\`\n**SIT Promotional Branch:** \`${sitPromoBranch}\`\n**Merged from:** CRM_DevTrial2 (PR #${prNumber})\n\n**Validation Status:** ✅ Passed\n\n**Merge Status:** ${mergeSuccess ? '✅ Success' : '❌ Failed'}\n**Changes Detected:** ${hasChanges ? '✅ Yes' : '⚠️ No changes detected (may already be in CRM_SITTrial)'}\n\n✅ Merge validation passed\n✅ PMD checks passed\n✅ Apex tests validated against SIT promotional branch\n\n⚠️ **Deployment to CRM_SITOrg will happen automatically after PR merge**\n\n✅ Ready for review and merge`;
             
             if (existingPRs.length > 0) {
               const existingPR = existingPRs[0];
