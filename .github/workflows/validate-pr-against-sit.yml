@@ -3,7 +3,8 @@ name: Feature Branch Validation and Promotion
 on:
   push:
     branches:
-      - 'feature/**'  # Triggers on push to any feature branch
+      - 'feature/*'      # Triggers on push to any feature branch (e.g., feature/121, feature/122)
+      - 'feature/**'     # Also support nested feature branches if needed
     paths-ignore:
       - '**.md'
       - '.gitignore'
