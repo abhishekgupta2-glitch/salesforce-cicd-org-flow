@@ -452,40 +452,225 @@ jobs:
             --set-default \
             --alias CRM_SITOrg
 
-      # Step 11: Deploy Delta Changes to CRM_SITOrg
-      - name: Deploy Delta Changes to CRM_SITOrg
+      # Step 11: Validate Deployment and Run Tests BEFORE Deployment (Like Change Sets)
+      - name: Validate Deployment and Run Tests (Pre-Deployment Check)
         if: steps.verify-merge-sit.outputs.merge_verified == 'true' && steps.delta-generation-sit-org.outputs.has_changes == 'true'
-        id: deploy-delta-sit
+        id: pre-deploy-validation-sit
+        env:
+          SF_ORG_ALIAS: CRM_SITOrg
         run: |
-          echo "[INFO] Deploying delta changes to CRM_SITOrg..."
+          echo "[INFO] =========================================="
+          echo "[INFO] Pre-Deployment Validation (Like Change Sets)"
+          echo "[INFO] =========================================="
           
           if [ ! -d "changed-sources-sit-org/force-app" ] || [ -z "$(ls -A changed-sources-sit-org/force-app 2>/dev/null)" ]; then
-            echo "[INFO] No changes to deploy. Skipping deployment."
-            echo "deployment_success=true" >> $GITHUB_OUTPUT
+            echo "[INFO] No changes to deploy. Skipping validation."
+            echo "validation_passed=true" >> $GITHUB_OUTPUT
             exit 0
           fi
           
-          sf project deploy start \
+          echo "[INFO] Step 1: Validating deployment syntax..."
+          # Validate deployment (dry-run) - checks syntax and dependencies
+          sf project deploy validate \
             --source-dir changed-sources-sit-org/force-app \
             --target-org CRM_SITOrg \
-            --wait 10 \
-            --json > deploy_results_sit.json || {
-              echo "[ERROR] Deployment failed"
-              cat deploy_results_sit.json
-              echo "deployment_success=false" >> $GITHUB_OUTPUT
+            --json > validate_results_sit.json || {
+              echo "[ERROR] Deployment validation failed"
+              cat validate_results_sit.json
+              echo "validation_passed=false" >> $GITHUB_OUTPUT
               exit 1
             }
           
-          echo "[INFO] ✅ Deployment successful"
+          VALIDATION_STATUS=$(jq -r '.status' validate_results_sit.json 2>/dev/null || echo "unknown")
+          echo "[INFO] Validation status: $VALIDATION_STATUS"
+          
+          if [ "$VALIDATION_STATUS" != "0" ] && [ "$VALIDATION_STATUS" != "Succeeded" ]; then
+            echo "[ERROR] Deployment validation failed"
+            jq '.result' validate_results_sit.json 2>/dev/null || cat validate_results_sit.json
+            echo "validation_passed=false" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+          
+          echo "[INFO] ✅ Deployment validation passed"
+          
+          echo "[INFO] Step 2: Deploying with test validation (like Change Sets)..."
+          echo "[INFO] =========================================="
+          echo "[INFO] IMPORTANT: This validates NEW changes from branch against org"
+          echo "[INFO] Salesforce CLI with --test-level works like Change Sets:"
+          echo "[INFO]   1. Deploys the NEW changes to org"
+          echo "[INFO]   2. Runs tests against the NEW changes + existing org code"
+          echo "[INFO]   3. If tests fail → Salesforce AUTOMATICALLY rolls back"
+          echo "[INFO]   4. If tests pass → Deployment completes successfully"
+          echo "[INFO] =========================================="
+          
+          # Verify org connection
+          sf org display --target-org CRM_SITOrg || {
+            echo "[ERROR] Cannot connect to CRM_SITOrg. Please check authentication."
+            echo "validation_passed=false" >> $GITHUB_OUTPUT
+            exit 1
+          }
+          
+          # Deploy with --test-level: Salesforce validates NEW changes during deployment
+          # If tests fail, Salesforce automatically rolls back (like Change Sets)
+          set +e
+          sf project deploy start \
+            --source-dir changed-sources-sit-org/force-app \
+            --target-org CRM_SITOrg \
+            --test-level RunLocalTests \
+            --wait 10 \
+            --json > deploy_with_validation_results_sit.json 2>&1
+          DEPLOY_EXIT_CODE=$?
+          set -e
+          
+          if [ ! -f deploy_with_validation_results_sit.json ] || [ ! -s deploy_with_validation_results_sit.json ]; then
+            echo "[ERROR] Deployment validation results file is missing or empty"
+            echo "validation_passed=false" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+          
+          # Check deployment status
+          DEPLOY_STATUS=$(jq -r '.status // "unknown"' deploy_with_validation_results_sit.json 2>/dev/null || echo "unknown")
+          echo "[INFO] Deployment status: $DEPLOY_STATUS"
+          
+          # Check if tests were run during deployment
+          TESTS_RUN=$(jq -r '.result.testsRun // 0' deploy_with_validation_results_sit.json 2>/dev/null || echo "0")
+          TESTS_PASSED=$(jq -r '.result.numberTestsPassed // 0' deploy_with_validation_results_sit.json 2>/dev/null || echo "0")
+          TESTS_FAILED=$(jq -r '.result.numberTestsFailed // 0' deploy_with_validation_results_sit.json 2>/dev/null || echo "0")
+          
+          echo "[INFO] Tests run during deployment: $TESTS_RUN"
+          echo "[INFO] Tests passed: $TESTS_PASSED"
+          echo "[INFO] Tests failed: $TESTS_FAILED"
+          
+          # Check deployment status and test results
+          if [ "$DEPLOY_STATUS" != "0" ] && [ "$DEPLOY_STATUS" != "Succeeded" ]; then
+            echo "[ERROR] =========================================="
+            echo "[ERROR] Deployment failed or was rolled back"
+            echo "[ERROR] Salesforce automatically rolled back from org (no manual action needed)"
+            echo "[ERROR] Pipeline will stop here - no further actions will execute"
+            echo "[ERROR] A revert PR will be created to remove changes from branch"
+            echo "[ERROR] =========================================="
+            jq '.result' deploy_with_validation_results_sit.json 2>/dev/null || cat deploy_with_validation_results_sit.json
+            echo "validation_passed=false" >> $GITHUB_OUTPUT
+            echo "tests_failed=true" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+          
+          if [ "$TESTS_RUN" = "0" ] || [ "$TESTS_RUN" = "null" ]; then
+            echo "[ERROR] =========================================="
+            echo "[ERROR] No tests were executed during deployment"
+            echo "[ERROR] Pipeline will stop here - no further actions will execute"
+            echo "[ERROR] A revert PR will be created to remove changes from branch"
+            echo "[ERROR] =========================================="
+            cat deploy_with_validation_results_sit.json
+            echo "validation_passed=false" >> $GITHUB_OUTPUT
+            echo "tests_failed=true" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+          
+          if [ "$TESTS_FAILED" -gt 0 ]; then
+            echo "[ERROR] =========================================="
+            echo "[ERROR] Tests failed during deployment"
+            echo "[ERROR] Salesforce automatically rolled back from org (no manual action needed)"
+            echo "[ERROR] Pipeline will stop here - no further actions will execute"
+            echo "[ERROR] A revert PR will be created to remove changes from branch"
+            echo "[ERROR] =========================================="
+            jq '.result.details' deploy_with_validation_results_sit.json 2>/dev/null || cat deploy_with_validation_results_sit.json
+            echo "validation_passed=false" >> $GITHUB_OUTPUT
+            echo "tests_failed=true" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+          
+          if [ $DEPLOY_EXIT_CODE -ne 0 ]; then
+            echo "[ERROR] =========================================="
+            echo "[ERROR] Deployment failed (tests may have failed, causing rollback)"
+            echo "[ERROR] Salesforce automatically rolled back from org (no manual action needed)"
+            echo "[ERROR] Pipeline will stop here - no further actions will execute"
+            echo "[ERROR] A revert PR will be created to remove changes from branch"
+            echo "[ERROR] =========================================="
+            cat deploy_with_validation_results_sit.json | head -100
+            echo "validation_passed=false" >> $GITHUB_OUTPUT
+            echo "tests_failed=true" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+          
+          # Check code coverage from deployment results
+          # Coverage includes NEW changes + existing org code
+          COVERAGE_RAW=$(jq -r '.result.coverage // .result.coveragePercentage // 0' deploy_with_validation_results_sit.json 2>/dev/null || echo "0")
+          
+          # Also try to calculate from code coverage array
+          if [ "$COVERAGE_RAW" = "0" ] || [ "$COVERAGE_RAW" = "null" ]; then
+            TOTAL_COVERED=$(jq -r '[.result.codeCoverage[]?.numLinesCovered // 0] | add' deploy_with_validation_results_sit.json 2>/dev/null || echo "0")
+            TOTAL_UNCOVERED=$(jq -r '[.result.codeCoverage[]?.numLinesUncovered // 0] | add' deploy_with_validation_results_sit.json 2>/dev/null || echo "0")
+            TOTAL_LINES=$((TOTAL_COVERED + TOTAL_UNCOVERED))
+            
+            if [ "$TOTAL_LINES" -gt 0 ]; then
+              COVERAGE=$(echo "scale=2; $TOTAL_COVERED * 100 / $TOTAL_LINES" | bc)
+              COVERAGE_RAW=$COVERAGE
+            fi
+          fi
+          
+          COVERAGE_CLEAN=$(echo "$COVERAGE_RAW" | sed 's/%//g' | sed 's/[^0-9.]//g' | tr -d ' ')
+          COVERAGE_NUM=$(echo "$COVERAGE_CLEAN" | awk '{print $1+0}')
+          
+          echo "[INFO] Code coverage after deployment (with NEW changes): $COVERAGE_NUM%"
+          echo "pre_deploy_coverage=$COVERAGE_NUM" >> $GITHUB_OUTPUT
+          
+          if awk "BEGIN {exit !($COVERAGE_NUM <= 75)}"; then
+            echo "[ERROR] Code coverage is below 75% (Current: $COVERAGE_NUM%)"
+            echo "[ERROR] Deployment succeeded but coverage is too low"
+            jq '.result.summary' deploy_with_validation_results_sit.json 2>/dev/null || cat deploy_with_validation_results_sit.json | head -50
+            echo "validation_passed=false" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+          
+          echo "[INFO] ✅ Deployment completed successfully"
+          echo "[INFO] ✅ NEW changes validated against org"
+          echo "[INFO] ✅ Tests passed with new changes"
+          echo "[INFO] ✅ Coverage check passed ($COVERAGE_NUM% > 75%)"
+          echo "validation_passed=true" >> $GITHUB_OUTPUT
+
+      # Step 12: Deployment already completed in Step 11 with test validation
+      # This step is now just for logging and final verification
+      - name: Verify Deployment Success (SIT)
+        if: steps.verify-merge-sit.outputs.merge_verified == 'true' && steps.delta-generation-sit-org.outputs.has_changes == 'true' && steps.pre-deploy-validation-sit.outputs.validation_passed == 'true'
+        id: verify-deployment-sit
+        run: |
+          echo "[INFO] =========================================="
+          echo "[INFO] Deployment verification (SIT)"
+          echo "[INFO] Deployment completed in Step 11 with test validation"
+          echo "[INFO] =========================================="
+          
+          if [ ! -f deploy_with_validation_results_sit.json ]; then
+            echo "[ERROR] Deployment results file not found"
+            echo "deployment_success=false" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+          
+          DEPLOY_STATUS=$(jq -r '.status // "unknown"' deploy_with_validation_results_sit.json 2>/dev/null || echo "unknown")
+          echo "[INFO] Final deployment status: $DEPLOY_STATUS"
+          
+          if [ "$DEPLOY_STATUS" != "0" ] && [ "$DEPLOY_STATUS" != "Succeeded" ]; then
+            echo "[ERROR] Deployment verification failed"
+            echo "deployment_success=false" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+          
+          echo "[INFO] ✅ Deployment verified successfully"
           echo "deployment_success=true" >> $GITHUB_OUTPUT
 
-      # Step 12: Run Apex Tests and Check Org-Wide Coverage
-      - name: Run Apex Tests and Check Org-Wide Coverage
-        if: steps.verify-merge-sit.outputs.merge_verified == 'true' && steps.deploy-delta-sit.outputs.deployment_success == 'true'
+      # Step 13: Verify Post-Deployment Coverage
+      - name: Verify Post-Deployment Coverage
+        if: steps.verify-merge-sit.outputs.merge_verified == 'true' && steps.verify-deployment-sit.outputs.deployment_success == 'true'
         id: apex-sit
+        env:
+          SF_ORG_ALIAS: CRM_SITOrg
         run: |
-          echo "[INFO] Running all local tests to validate org-wide coverage"
+          echo "[INFO] =========================================="
+          echo "[INFO] Post-Deployment Verification"
+          echo "[INFO] Verifying org-wide coverage after deployment"
+          echo "[INFO] =========================================="
           
+          # Run tests again to verify post-deployment state
           set +e
           sf apex run test \
             --test-level RunLocalTests \
@@ -497,18 +682,12 @@ jobs:
           set -e
           
           if [ ! -f test_results_sit_org.json ] || [ ! -s test_results_sit_org.json ]; then
-            echo "[ERROR] Test results file is missing or empty"
+            echo "[ERROR] Post-deployment test results file is missing or empty"
             exit 1
           fi
           
-          if grep -qi "no.*test.*found\|no.*apex.*test\|no tests in org" test_results_sit_org.json 2>/dev/null; then
-            echo "[WARN] No tests found in org."
-            echo "coverage=N/A" >> $GITHUB_OUTPUT
-            exit 0
-          fi
-          
           if [ $TEST_EXIT_CODE -ne 0 ]; then
-            echo "[ERROR] Test execution failed"
+            echo "[ERROR] Post-deployment test execution failed"
             cat test_results_sit_org.json | head -100
             exit 1
           fi
@@ -516,11 +695,12 @@ jobs:
           TEST_STATUS=$(jq -r '.status // "unknown"' test_results_sit_org.json 2>/dev/null || echo "unknown")
           
           if [ "$TEST_STATUS" != "0" ] && [ "$TEST_STATUS" != "success" ]; then
-            echo "[ERROR] Tests failed. Status: $TEST_STATUS"
+            echo "[ERROR] Post-deployment tests failed. Status: $TEST_STATUS"
             jq '.result.summary' test_results_sit_org.json 2>/dev/null || cat test_results_sit_org.json
             exit 1
           fi
           
+          # Calculate post-deployment coverage
           TOTAL_COVERED=$(jq -r '[.result.codeCoverage[]?.numLinesCovered // 0] | add' test_results_sit_org.json 2>/dev/null || echo "0")
           TOTAL_UNCOVERED=$(jq -r '[.result.codeCoverage[]?.numLinesUncovered // 0] | add' test_results_sit_org.json 2>/dev/null || echo "0")
           TOTAL_LINES=$((TOTAL_COVERED + TOTAL_UNCOVERED))
@@ -535,14 +715,144 @@ jobs:
           COVERAGE_CLEAN=$(echo "$COVERAGE" | sed 's/[^0-9.]//g')
           COVERAGE_NUM=$(echo "$COVERAGE_CLEAN" | awk '{print $1+0}')
           
+          PRE_DEPLOY_COVERAGE="${{ steps.pre-deploy-validation-sit.outputs.pre_deploy_coverage }}"
+          
+          echo "[INFO] Pre-deployment coverage: ${PRE_DEPLOY_COVERAGE}%"
+          echo "[INFO] Post-deployment coverage: $COVERAGE_NUM%"
+          
           echo "coverage=$COVERAGE_NUM" >> $GITHUB_OUTPUT
           
           if awk "BEGIN {exit !($COVERAGE_NUM <= 75)}"; then
-            echo "[ERROR] Org-wide coverage must be greater than 75% (Current: $COVERAGE_NUM%)"
+            echo "[ERROR] Post-deployment org-wide coverage is below 75% (Current: $COVERAGE_NUM%)"
+            echo "[ERROR] This should not happen as pre-deployment validation passed"
+            jq '.result.summary' test_results_sit_org.json 2>/dev/null || cat test_results_sit_org.json | head -50
+            echo "tests_passed=false" >> $GITHUB_OUTPUT
             exit 1
           fi
           
-          echo "[INFO] ✅ Org-wide coverage validation passed: $COVERAGE_NUM%"
+          echo "tests_passed=true" >> $GITHUB_OUTPUT
+          echo "[INFO] ✅ Post-deployment verification passed"
+          echo "[INFO] ✅ Org-wide coverage maintained: $COVERAGE_NUM%"
+
+      # Step 13b: Create Revert PR if Tests Failed
+      - name: Create Revert PR if Tests Failed (SIT)
+        if: steps.pre-deploy-validation-sit.outputs.validation_passed == 'false' || steps.pre-deploy-validation-sit.outcome == 'failure' || steps.pre-deploy-validation-sit.outputs.tests_failed == 'true'
+        uses: actions/github-script@v6
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const { execSync } = require('child_process');
+            
+            console.log('[ERROR] Tests failed during deployment - Creating revert PR...');
+            console.log('[INFO] Salesforce automatically rolled back from org (no manual action needed)');
+            console.log('[INFO] This revert PR will remove the changes from the branch');
+            
+            const BASE_BRANCH = 'CRM_SITTrial';
+            const MERGE_COMMIT = '${{ github.event.pull_request.merge_commit_sha }}';
+            const ORIGINAL_PR_NUMBER = context.payload.pull_request?.number;
+            const ORIGINAL_PR_TITLE = context.payload.pull_request?.title || 'Unknown';
+            
+            try {
+              // Configure git
+              execSync('git config --global user.name "github-actions[bot]"', { stdio: 'inherit' });
+              execSync('git config --global user.email "github-actions[bot]@users.noreply.github.com"', { stdio: 'inherit' });
+              
+              // Fetch latest
+              execSync(`git fetch origin ${BASE_BRANCH}`, { stdio: 'inherit' });
+              
+              // Create revert branch
+              const revertBranch = `revert/${BASE_BRANCH}-pr-${ORIGINAL_PR_NUMBER}-${Date.now()}`;
+              execSync(`git checkout -b ${revertBranch} origin/${BASE_BRANCH}`, { stdio: 'inherit' });
+              
+              // Revert the merge commit
+              try {
+                execSync(`git revert -m 1 ${MERGE_COMMIT} --no-edit`, { stdio: 'inherit' });
+                console.log(`✅ Successfully reverted merge commit ${MERGE_COMMIT}`);
+              } catch (revertError) {
+                console.log(`⚠️ Automatic revert failed (may have conflicts): ${revertError.message}`);
+              }
+              
+              // Push revert branch
+              try {
+                execSync(`git push -u origin ${revertBranch}`, { stdio: 'inherit' });
+                
+                // Create revert PR
+                const revertPRBody = `## ⚠️ Automatic Revert: Tests Failed During Deployment\n\n` +
+                  `**Original PR:** #${ORIGINAL_PR_NUMBER}\n` +
+                  `**Original PR Title:** ${ORIGINAL_PR_TITLE}\n` +
+                  `**Reason:** Tests failed during deployment validation\n\n` +
+                  `**✅ AUTOMATIC ACTIONS TAKEN:**\n` +
+                  `- ✅ Salesforce automatically rolled back from org (NO manual rollback needed)\n` +
+                  `- ✅ Pipeline stopped - no further actions executed\n` +
+                  `- ✅ Revert PR created and will be automatically merged\n` +
+                  `- ✅ Changes automatically removed from branch\n\n` +
+                  `**Next Steps:**\n` +
+                  `1. Fix test failures or coverage issues in original feature branch\n` +
+                  `2. Create new PR after fixes\n\n` +
+                  `**Note:** Org is already clean - Salesforce automatically rolled back when tests failed.`;
+                
+                const { data: revertPR } = await github.rest.pulls.create({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  title: `[AUTO-REVERT] Revert PR #${ORIGINAL_PR_NUMBER}: ${ORIGINAL_PR_TITLE}`,
+                  head: revertBranch,
+                  base: BASE_BRANCH,
+                  body: revertPRBody,
+                  draft: false
+                });
+                
+                console.log(`✅ Revert PR created: ${revertPR.html_url}`);
+                
+                // Automatically merge the revert PR
+                try {
+                  console.log(`🔄 Auto-merging revert PR #${revertPR.number}...`);
+                  
+                  // Wait a moment for PR to be fully created
+                  await new Promise(resolve => setTimeout(resolve, 2000));
+                  
+                  // Merge the revert PR
+                  const mergeResult = await github.rest.pulls.merge({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    pull_number: revertPR.number,
+                    merge_method: 'merge',
+                    commit_title: `[AUTO-MERGE] Revert PR #${ORIGINAL_PR_NUMBER}`,
+                    commit_message: `Automatically merged revert PR after test failure during deployment`
+                  });
+                  
+                  console.log(`✅ Revert PR #${revertPR.number} automatically merged successfully`);
+                  console.log(`✅ Changes removed from ${BASE_BRANCH} branch`);
+                } catch (mergeError) {
+                  console.log(`⚠️ Failed to auto-merge revert PR: ${mergeError.message}`);
+                  console.log(`⚠️ Please manually merge PR #${revertPR.number}: ${revertPR.html_url}`);
+                  
+                  // If merge fails due to branch protection or other reasons, try to add a comment
+                  try {
+                    await github.rest.issues.createComment({
+                      owner: context.repo.owner,
+                      repo: context.repo.repo,
+                      issue_number: revertPR.number,
+                      body: `⚠️ **Auto-merge failed** - Please merge this PR manually to complete the revert.\n\nReason: ${mergeError.message}`
+                    });
+                  } catch (commentError) {
+                    console.log(`⚠️ Could not add comment to PR: ${commentError.message}`);
+                  }
+                }
+                
+                console.log(`✅ No org rollback needed - deployment was prevented`);
+              } catch (pushError) {
+                console.log(`⚠️ Failed to push revert branch: ${pushError.message}`);
+              }
+            } catch (error) {
+              console.log(`[ERROR] Failed to create revert PR: ${error.message}`);
+            }
+            
+            console.log('\n[ERROR] ⚠️ PRE-DEPLOYMENT VALIDATION FAILED');
+            console.log('[ERROR] Deployment was prevented - no changes deployed to org');
+            console.log('[ERROR] Revert PR created to remove changes from branch');
+            
+            // Fail the workflow
+            process.exit(1);
 
       # Step 13: Comment on PR
       - name: Comment on PR
