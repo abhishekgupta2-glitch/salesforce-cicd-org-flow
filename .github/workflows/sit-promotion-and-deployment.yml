@@ -14,6 +14,7 @@ jobs:
   promote-to-sit:
     runs-on: ubuntu-latest
     # Only run if PR to CRM_DevTrial2 is merged and from promotional branch
+    # This job creates the SIT promotional branch and PR
     if: |
       github.event.pull_request.merged == true &&
       github.event.pull_request.base.ref == 'CRM_DevTrial2' &&
@@ -61,9 +62,42 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y jq bc -qq
 
-      # Step 7: Extract feature number and create SIT promotional branch
+      # Step 7: Verify Trigger and Extract Feature Number
+      - name: Verify Trigger and Extract Feature Number
+        id: verify-trigger-promote
+        run: |
+          BASE_REF="${{ github.event.pull_request.base.ref }}"
+          HEAD_REF="${{ github.event.pull_request.head.ref }}"
+          MERGED="${{ github.event.pull_request.merged }}"
+          
+          echo "[INFO] Checking if this is the correct trigger for SIT promotion..."
+          echo "[INFO] Base branch: $BASE_REF"
+          echo "[INFO] Head branch: $HEAD_REF"
+          echo "[INFO] Merged: $MERGED"
+          
+          # CRITICAL: Only proceed if this is a PR to CRM_DevTrial2 from promo/ branch
+          if [ "$BASE_REF" != "CRM_DevTrial2" ]; then
+            echo "[ERROR] This job should only run for PRs to CRM_DevTrial2, but base ref is: $BASE_REF"
+            echo "[ERROR] Exiting - this job should not run for CRM_SITTrial PR merges"
+            exit 1
+          fi
+          
+          if [[ ! "$HEAD_REF" == promo/* ]]; then
+            echo "[ERROR] This job should only run for PRs from promo/ branches, but head ref is: $HEAD_REF"
+            exit 1
+          fi
+          
+          if [ "$MERGED" != "true" ]; then
+            echo "[ERROR] PR was not merged, only closed"
+            exit 1
+          fi
+          
+          echo "[INFO] ✅ Valid trigger confirmed - CRM_DevTrial2 PR #${{ github.event.pull_request.number }} was merged"
+
+      # Step 8: Extract feature number and create SIT promotional branch
       - name: Create SIT Promotional Branch
         id: create-sit-promo
+        if: steps.verify-trigger-promote.outcome == 'success'
         run: |
           PROMO_BRANCH="${{ github.event.pull_request.head.ref }}"
           FEATURE_NUM=$(echo "$PROMO_BRANCH" | sed 's/promo\///g')
@@ -129,7 +163,7 @@ jobs:
           echo "merge_success=true" >> $GITHUB_OUTPUT
           echo "[INFO] ✅ SIT promotional branch created and merged successfully"
 
-      # Step 8: Generate Delta Packages
+      # Step 9: Generate Delta Packages
       - name: Generate Delta Packages for SIT
         id: delta-generation-sit
         if: steps.create-sit-promo.outputs.merge_success == 'true'
@@ -166,7 +200,7 @@ jobs:
             echo "[INFO] No changes detected for SIT deployment"
           fi
 
-      # Step 9: Run PMD Checks
+      # Step 10: Run PMD Checks
       - name: Run PMD Apex Checks for SIT
         id: pmd-check-sit
         continue-on-error: true
@@ -190,7 +224,7 @@ jobs:
           echo "pmd_passed=true" >> $GITHUB_OUTPUT
           echo "pmd_violations=$VIOLATION_COUNT" >> $GITHUB_OUTPUT
 
-      # Step 10: Run Apex Tests against SIT Promotional Branch
+      # Step 11: Run Apex Tests against SIT Promotional Branch
       - name: Run Apex Tests against SIT Promotional Branch
         id: apex-tests-sit
         if: steps.create-sit-promo.outputs.merge_success == 'true' && steps.pmd-check-sit.outputs.pmd_passed == 'true' && steps.delta-generation-sit.outputs.has_changes == 'true'
@@ -206,7 +240,7 @@ jobs:
           echo "[INFO] ✅ Apex test validation passed against SIT promotional branch"
           echo "tests_passed=true" >> $GITHUB_OUTPUT
 
-      # Step 11: Push SIT Promotional Branch and Create/Update PR
+      # Step 12: Push SIT Promotional Branch and Create/Update PR
       - name: Push SIT Promotional Branch and Create/Update PR
         if: steps.create-sit-promo.outputs.merge_success == 'true' && steps.pmd-check-sit.outputs.pmd_passed == 'true' && steps.apex-tests-sit.outputs.tests_passed == 'true'
         uses: actions/github-script@v6
@@ -286,8 +320,9 @@ jobs:
 
   deploy-to-sit-org:
     runs-on: ubuntu-latest
-    # Trigger when PR from sit-promo/ branch to CRM_SITTrial is merged
-    # This job runs independently when PR to CRM_SITTrial is merged
+    # IMPORTANT: This job ONLY runs when PR from sit-promo/ branch to CRM_SITTrial is merged
+    # It does NOT run when CRM_DevTrial2 PR is merged
+    # Sequential flow: CRM_DevTrial2 PR merged → promote-to-sit runs → creates SIT PR → SIT PR merged → deploy-to-sit-org runs
     if: |
       github.event.pull_request.merged == true &&
       github.event.pull_request.base.ref == 'CRM_SITTrial' &&
@@ -334,17 +369,43 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y jq bc -qq
 
-      # Step 7: Verify PR Merge Status
-      - name: Verify PR Merge Status
+      # Step 7: Verify PR Merge Status and Trigger Validation
+      - name: Verify PR Merge Status and Trigger Validation
         id: verify-merge-sit
         run: |
-          echo "[INFO] SIT PR #${{ github.event.pull_request.number }} was merged"
+          BASE_REF="${{ github.event.pull_request.base.ref }}"
+          HEAD_REF="${{ github.event.pull_request.head.ref }}"
+          MERGED="${{ github.event.pull_request.merged }}"
+          
+          echo "[INFO] Checking if this is the correct trigger for SIT deployment..."
+          echo "[INFO] Base branch: $BASE_REF"
+          echo "[INFO] Head branch: $HEAD_REF"
+          echo "[INFO] Merged: $MERGED"
+          
+          # CRITICAL: Only proceed if this is a PR to CRM_SITTrial from sit-promo/ branch
+          if [ "$BASE_REF" != "CRM_SITTrial" ]; then
+            echo "[ERROR] This job should only run for PRs to CRM_SITTrial, but base ref is: $BASE_REF"
+            echo "[ERROR] Exiting - this job should not run for CRM_DevTrial2 PR merges"
+            exit 1
+          fi
+          
+          if [[ ! "$HEAD_REF" == sit-promo/* ]]; then
+            echo "[ERROR] This job should only run for PRs from sit-promo/ branches, but head ref is: $HEAD_REF"
+            exit 1
+          fi
+          
+          if [ "$MERGED" != "true" ]; then
+            echo "[ERROR] PR was not merged, only closed"
+            exit 1
+          fi
+          
+          echo "[INFO] ✅ Valid trigger confirmed - SIT PR #${{ github.event.pull_request.number }} was merged"
           echo "[INFO] Merged by: ${{ github.event.pull_request.merged_by.login }}"
           echo "[INFO] Merge commit: ${{ github.event.pull_request.merge_commit_sha }}"
           echo "merge_verified=true" >> $GITHUB_OUTPUT
           echo "merged_by=${{ github.event.pull_request.merged_by.login }}" >> $GITHUB_OUTPUT
 
-      # Step 8: Generate Delta Packages
+      # Step 9: Generate Delta Packages
       - name: Create delta packages for SIT Org
         id: delta-generation-sit-org
         if: steps.verify-merge-sit.outputs.merge_verified == 'true'
@@ -378,7 +439,7 @@ jobs:
             echo "has_changes=false" >> $GITHUB_OUTPUT
           fi
 
-      # Step 9: Authorize CRM_SITOrg (JWT)
+      # Step 10: Authorize CRM_SITOrg (JWT)
       - name: Authorize CRM_SITOrg (JWT)
         if: steps.verify-merge-sit.outputs.merge_verified == 'true' && steps.delta-generation-sit-org.outputs.has_changes == 'true'
         run: |
@@ -391,7 +452,7 @@ jobs:
             --set-default \
             --alias CRM_SITOrg
 
-      # Step 10: Deploy Delta Changes to CRM_SITOrg
+      # Step 11: Deploy Delta Changes to CRM_SITOrg
       - name: Deploy Delta Changes to CRM_SITOrg
         if: steps.verify-merge-sit.outputs.merge_verified == 'true' && steps.delta-generation-sit-org.outputs.has_changes == 'true'
         id: deploy-delta-sit
@@ -418,7 +479,7 @@ jobs:
           echo "[INFO] ✅ Deployment successful"
           echo "deployment_success=true" >> $GITHUB_OUTPUT
 
-      # Step 11: Run Apex Tests and Check Org-Wide Coverage
+      # Step 12: Run Apex Tests and Check Org-Wide Coverage
       - name: Run Apex Tests and Check Org-Wide Coverage
         if: steps.verify-merge-sit.outputs.merge_verified == 'true' && steps.deploy-delta-sit.outputs.deployment_success == 'true'
         id: apex-sit
@@ -483,7 +544,7 @@ jobs:
           
           echo "[INFO] ✅ Org-wide coverage validation passed: $COVERAGE_NUM%"
 
-      # Step 12: Comment on PR
+      # Step 13: Comment on PR
       - name: Comment on PR
         if: always()
         uses: actions/github-script@v6
@@ -518,7 +579,7 @@ jobs:
               body: comment
             });
 
-      # Step 13: Summary
+      # Step 14: Summary
       - name: Summary
         if: always()
         run: |
