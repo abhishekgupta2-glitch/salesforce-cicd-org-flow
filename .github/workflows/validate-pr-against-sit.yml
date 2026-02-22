@@ -345,20 +345,112 @@ jobs:
       - name: Run Apex Tests against Promotional Branch
         if: steps.validate-merge.outputs.merge_success == 'true' && steps.pmd-check.outputs.pmd_passed == 'true'
         id: apex-tests
-        continue-on-error: false
+        continue-on-error: true
         run: |
           chmod +x scripts/run-apex-tests.sh
           
           # Run tests against promotional branch code
+          set +e
           scripts/run-apex-tests.sh force-app test_results.json
+          TEST_EXIT_CODE=$?
+          set -e
           
           if [ ! -f test_results.json ]; then
             echo "[ERROR] Test results file not generated"
+            echo "tests_passed=false" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+          
+          if [ $TEST_EXIT_CODE -ne 0 ]; then
+            echo "[ERROR] ❌ Apex test validation FAILED"
+            echo "[ERROR] Test class validation failed - see errors above"
+            echo "tests_passed=false" >> $GITHUB_OUTPUT
             exit 1
           fi
           
           echo "[INFO] ✅ Apex test validation passed against promotional branch"
           echo "tests_passed=true" >> $GITHUB_OUTPUT
+
+      # Step 11b: Handle Test Validation Failure - Close PR and Cleanup
+      - name: Handle Test Validation Failure
+        if: steps.validate-merge.outputs.merge_success == 'true' && (steps.apex-tests.outputs.tests_passed == 'false' || steps.apex-tests.outcome == 'failure')
+        uses: actions/github-script@v6
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const promoBranch = '${{ steps.validate-merge.outputs.promo_branch }}';
+            const featureBranch = '${GITHUB_REF#refs/heads/}';
+            
+            console.log('[ERROR] ==========================================');
+            console.log('[ERROR] Test class validation FAILED');
+            console.log('[ERROR] Closing PR and cleaning up promotional branch');
+            console.log('[ERROR] ==========================================');
+            
+            try {
+              // Find existing PR for this promotional branch
+              const { data: existingPRs } = await github.rest.pulls.list({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                head: `${context.repo.owner}:${promoBranch}`,
+                base: 'CRM_DevTrial2',
+                state: 'open'
+              });
+              
+              if (existingPRs.length > 0) {
+                const pr = existingPRs[0];
+                console.log(`[INFO] Found existing PR #${pr.number}, closing it...`);
+                
+                // Add comment explaining why PR is being closed
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: pr.number,
+                  body: `## ❌ PR Closed: Test Class Validation Failed\n\n` +
+                    `**Reason:** Test class validation failed during pre-deployment checks\n\n` +
+                    `**What happened:**\n` +
+                    `- Test classes in the promotional branch failed validation\n` +
+                    `- Test classes must have proper @isTest annotations and valid test methods\n` +
+                    `- See workflow logs for detailed error messages\n\n` +
+                    `**Action Required:**\n` +
+                    `1. Fix test class issues in feature branch: \`${featureBranch}\`\n` +
+                    `2. Push fixes to feature branch\n` +
+                    `3. A new PR will be created automatically after fixes\n\n` +
+                    `**Note:** No deployment occurred - validation failed before PR merge.`
+                });
+                
+                // Close the PR
+                await github.rest.pulls.update({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  pull_number: pr.number,
+                  state: 'closed'
+                });
+                
+                console.log(`✅ PR #${pr.number} closed successfully`);
+              } else {
+                console.log(`ℹ️ No existing PR found for ${promoBranch}`);
+              }
+              
+              // Delete the promotional branch since validation failed
+              try {
+                const { execSync } = require('child_process');
+                execSync(`git push origin --delete ${promoBranch}`, { stdio: 'pipe' });
+                console.log(`✅ Promotional branch ${promoBranch} deleted`);
+              } catch (deleteError) {
+                console.log(`⚠️ Could not delete promotional branch: ${deleteError.message}`);
+                console.log(`ℹ️ Branch may not exist or may have been deleted already`);
+              }
+              
+            } catch (error) {
+              console.log(`[ERROR] Failed to handle test validation failure: ${error.message}`);
+            }
+            
+            console.log('\n[ERROR] ⚠️ TEST CLASS VALIDATION FAILED');
+            console.log('[ERROR] PR closed and promotional branch cleaned up');
+            console.log('[ERROR] Please fix test class issues and push again');
+            
+            // Fail the workflow
+            process.exit(1);
 
       # Step 12: Push Promotional Branch and Create/Update PR
       - name: Push Promotional Branch and Create/Update PR
