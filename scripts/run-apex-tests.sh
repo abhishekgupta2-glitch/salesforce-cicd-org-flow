@@ -64,13 +64,17 @@ echo "[INFO] Test classes to validate: $TEST_NAMES"
 echo "[INFO] Performing basic test class validation..."
 
 VALIDATION_FAILED=0
+FAILED_CLASSES=""
 for TEST_FILE in $TEST_CLASSES; do
   CLASS_NAME=$(basename "$TEST_FILE" .cls)
+  CLASS_FAILED=0
   
   # Check if it's a valid test class
   if ! grep -qE "@isTest|@IsTest" "$TEST_FILE" 2>/dev/null; then
-    echo "[WARN] $CLASS_NAME: Missing @isTest annotation"
+    echo "[ERROR] $CLASS_NAME: Missing @isTest annotation"
     VALIDATION_FAILED=$((VALIDATION_FAILED + 1))
+    CLASS_FAILED=1
+    FAILED_CLASSES="${FAILED_CLASSES}  - $CLASS_NAME: Missing @isTest annotation"$'\n'
   fi
   
   # Check for test methods (support @isTest, @Test, or testMethod)
@@ -84,8 +88,10 @@ for TEST_FILE in $TEST_CLASSES; do
   METHOD_SIGNATURE_COUNT=$(grep -cE "^\s*(public|private|global|protected)?\s*(static\s+)?void\s+\w+\s*\(" "$TEST_FILE" 2>/dev/null || echo "0")
   
   if [ "$TEST_ANNOTATION_COUNT" -eq 0 ] && [ "$TESTMETHOD_COUNT" -eq 0 ]; then
-    echo "[WARN] $CLASS_NAME: No test method annotations found (looking for @isTest, @Test, or testMethod)"
+    echo "[ERROR] $CLASS_NAME: No test method annotations found (need @isTest, @Test, or testMethod)"
     VALIDATION_FAILED=$((VALIDATION_FAILED + 1))
+    CLASS_FAILED=1
+    FAILED_CLASSES="${FAILED_CLASSES}  - $CLASS_NAME: No test methods (add @isTest or testMethod)"$'\n'
   else
     # If we have @isTest annotations, check if there are methods
     # A valid test class should have: @isTest on class + @isTest on methods, OR testMethod keyword
@@ -103,12 +109,14 @@ for TEST_FILE in $TEST_CLASSES; do
       if awk '/@isTest|@IsTest|@Test/ {getline; if (/^\s*(static\s+)?void/) found=1} END {exit !found}' "$TEST_FILE" 2>/dev/null; then
         echo "[INFO] $CLASS_NAME: Found test methods with @isTest annotation (multi-line format)"
       else
-        echo "[WARN] $CLASS_NAME: Has @isTest class annotation but methods may not be properly annotated"
+        echo "[ERROR] $CLASS_NAME: Has @isTest class annotation but methods may not be properly annotated"
         VALIDATION_FAILED=$((VALIDATION_FAILED + 1))
+        FAILED_CLASSES="${FAILED_CLASSES}  - $CLASS_NAME: Methods not properly annotated"$'\n'
       fi
     elif [ "$TEST_ANNOTATION_COUNT" -eq 1 ] && [ "$METHOD_SIGNATURE_COUNT" -eq 0 ]; then
-      echo "[WARN] $CLASS_NAME: Has @isTest annotation but no methods found"
+      echo "[ERROR] $CLASS_NAME: Has @isTest annotation but no test methods found"
       VALIDATION_FAILED=$((VALIDATION_FAILED + 1))
+      FAILED_CLASSES="${FAILED_CLASSES}  - $CLASS_NAME: No test methods found"$'\n'
     else
       echo "[INFO] $CLASS_NAME: Test class validation passed"
     fi
@@ -139,8 +147,9 @@ for TEST_FILE in $TEST_CLASSES; do
   
   # Check for proper test class structure (this should fail)
   if ! grep -qE "class\s+$CLASS_NAME" "$TEST_FILE" 2>/dev/null; then
-    echo "[ERROR] $CLASS_NAME: Invalid class declaration"
+    echo "[ERROR] $CLASS_NAME: Invalid class declaration (expected: class $CLASS_NAME)"
     VALIDATION_FAILED=$((VALIDATION_FAILED + 1))
+    FAILED_CLASSES="${FAILED_CLASSES}  - $CLASS_NAME: Invalid class declaration"$'\n'
   fi
 done
 
@@ -160,12 +169,21 @@ fi
 echo "[INFO] Validation errors: $VALIDATION_FAILED"
 
 if [ $VALIDATION_FAILED -gt 0 ]; then
-  echo "[ERROR] ❌ Test class validation FAILED"
-  echo "[ERROR] Please fix the issues above before proceeding"
-  echo "[ERROR] Test classes must have:"
-  echo "[ERROR]   - @isTest annotation"
-  echo "[ERROR]   - Valid test methods with @isTest or testMethod"
-  echo "[ERROR]   - Proper class structure"
+  echo "[ERROR] =========================================="
+  echo "[ERROR] ❌ Test class validation FAILED ($VALIDATION_FAILED issue(s))"
+  echo "[ERROR] =========================================="
+  echo "[ERROR]"
+  echo "[ERROR] Failing class(es) and reason(s):"
+  echo "$FAILED_CLASSES" | sed 's/^/[ERROR] /'
+  echo "[ERROR]"
+  echo "[ERROR] Required for each test class:"
+  echo "[ERROR]   - @isTest annotation on the class"
+  echo "[ERROR]   - Valid test methods with @isTest, @Test, or testMethod keyword"
+  echo "[ERROR]   - Proper class declaration: class ClassName"
+  echo "[ERROR]"
+  echo "[ERROR] Note: Code coverage % is validated during org deployment (75% threshold)."
+  echo "[ERROR] This step validates test class STRUCTURE only."
+  echo "[ERROR] =========================================="
   exit 1
 fi
 
