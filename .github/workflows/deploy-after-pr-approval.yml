@@ -13,9 +13,16 @@ jobs:
   deploy-after-merge:
     runs-on: ubuntu-latest
     # Only run if PR was merged (not just closed) and from promotional branch
+    # SKIP revert PRs
     if: |
       github.event.pull_request.merged == true &&
-      startsWith(github.event.pull_request.head.ref, 'promo/')
+      startsWith(github.event.pull_request.head.ref, 'promo/') &&
+      !contains(github.event.pull_request.title, '[AUTO-REVERT]') &&
+      !contains(github.event.pull_request.title, '[AUTO-MERGE] Revert') &&
+      !contains(github.event.pull_request.head.ref, 'revert/')
+    outputs:
+      deployment_success: ${{ steps.set-outputs.outputs.deployment_success }}
+      has_changes: ${{ steps.delta-generation.outputs.has_changes }}
     
     permissions:
       contents: write
@@ -90,9 +97,9 @@ jobs:
           sf sgd source delta \
             --from "$BASE_COMMIT" \
             --to "$MERGE_COMMIT" \
-            --output "changed-sources" \
+            --output-dir "changed-sources" \
             --generate-delta \
-            --source "force-app" || {
+            --source-dir "force-app" || {
               echo "[WARN] Delta generation failed or no changes detected"
               echo "has_changes=false" >> $GITHUB_OUTPUT
               exit 0
@@ -194,9 +201,10 @@ jobs:
           echo "[INFO] Deployment status: $DEPLOY_STATUS"
           
           # Check if tests were run during deployment
-          TESTS_RUN=$(jq -r '.result.testsRun // 0' deploy_with_validation_results.json 2>/dev/null || echo "0")
-          TESTS_PASSED=$(jq -r '.result.numberTestsPassed // 0' deploy_with_validation_results.json 2>/dev/null || echo "0")
-          TESTS_FAILED=$(jq -r '.result.numberTestsFailed // 0' deploy_with_validation_results.json 2>/dev/null || echo "0")
+          # Salesforce returns: result.numberTestsCompleted, result.details.runTestResult.numTestsRun, result.details.runTestResult.numFailures
+          TESTS_RUN=$(jq -r '.result.numberTestsCompleted // .result.details.runTestResult.numTestsRun // 0' deploy_with_validation_results.json 2>/dev/null || echo "0")
+          TESTS_PASSED=$(jq -r '.result.numberTestsCompleted // .result.details.runTestResult.numTestsRun // 0' deploy_with_validation_results.json 2>/dev/null || echo "0")
+          TESTS_FAILED=$(jq -r '.result.details.runTestResult.numFailures // .result.numberTestErrors // 0' deploy_with_validation_results.json 2>/dev/null || echo "0")
           
           echo "[INFO] Tests run during deployment: $TESTS_RUN"
           echo "[INFO] Tests passed: $TESTS_PASSED"
@@ -222,7 +230,8 @@ jobs:
             echo "[ERROR] Pipeline will stop here - no further actions will execute"
             echo "[ERROR] A revert PR will be created to remove changes from branch"
             echo "[ERROR] =========================================="
-            cat deploy_with_validation_results.json
+            echo "[ERROR] Deployment result structure (check result.details.runTestResult):"
+            jq '.result.details.runTestResult // .result' deploy_with_validation_results.json 2>/dev/null || cat deploy_with_validation_results.json
             echo "validation_passed=false" >> $GITHUB_OUTPUT
             echo "tests_failed=true" >> $GITHUB_OUTPUT
             exit 1
@@ -230,12 +239,14 @@ jobs:
           
           if [ "$TESTS_FAILED" -gt 0 ]; then
             echo "[ERROR] =========================================="
-            echo "[ERROR] Tests failed during deployment"
+            echo "[ERROR] Tests failed during deployment ($TESTS_FAILED test(s) failed)"
             echo "[ERROR] Salesforce automatically rolled back from org (no manual action needed)"
             echo "[ERROR] Pipeline will stop here - no further actions will execute"
             echo "[ERROR] A revert PR will be created to remove changes from branch"
             echo "[ERROR] =========================================="
-            jq '.result.details' deploy_with_validation_results.json 2>/dev/null || cat deploy_with_validation_results.json
+            echo "[ERROR] Failed test(s):"
+            jq -r '.result.details.runTestResult.failures[]? | "  - \(.name).\(.methodName): \(.message)"' deploy_with_validation_results.json 2>/dev/null || true
+            jq '.result.details.runTestResult.failures // .result.details' deploy_with_validation_results.json 2>/dev/null || cat deploy_with_validation_results.json
             echo "validation_passed=false" >> $GITHUB_OUTPUT
             echo "tests_failed=true" >> $GITHUB_OUTPUT
             exit 1
@@ -256,12 +267,13 @@ jobs:
           
           # Check code coverage from deployment results
           # Coverage includes NEW changes + existing org code
+          # Path: result.details.runTestResult.codeCoverage (deploy) or result.codeCoverage (apex run test)
           COVERAGE_RAW=$(jq -r '.result.coverage // .result.coveragePercentage // 0' deploy_with_validation_results.json 2>/dev/null || echo "0")
           
-          # Also try to calculate from code coverage array
+          # Also try to calculate from code coverage array (runTestResult.codeCoverage uses numLocations/numLocationsNotCovered)
           if [ "$COVERAGE_RAW" = "0" ] || [ "$COVERAGE_RAW" = "null" ]; then
-            TOTAL_COVERED=$(jq -r '[.result.codeCoverage[]?.numLinesCovered // 0] | add' deploy_with_validation_results.json 2>/dev/null || echo "0")
-            TOTAL_UNCOVERED=$(jq -r '[.result.codeCoverage[]?.numLinesUncovered // 0] | add' deploy_with_validation_results.json 2>/dev/null || echo "0")
+            TOTAL_COVERED=$(jq -r '[.result.details.runTestResult.codeCoverage[]? | ((.numLocations // 0) - (.numLocationsNotCovered // 0))] | add' deploy_with_validation_results.json 2>/dev/null || jq -r '[.result.codeCoverage[]?.numLinesCovered // 0] | add' deploy_with_validation_results.json 2>/dev/null || echo "0")
+            TOTAL_UNCOVERED=$(jq -r '[.result.details.runTestResult.codeCoverage[]?.numLocationsNotCovered // 0] | add' deploy_with_validation_results.json 2>/dev/null || jq -r '[.result.codeCoverage[]?.numLinesUncovered // 0] | add' deploy_with_validation_results.json 2>/dev/null || echo "0")
             TOTAL_LINES=$((TOTAL_COVERED + TOTAL_UNCOVERED))
             
             if [ "$TOTAL_LINES" -gt 0 ]; then
@@ -277,9 +289,13 @@ jobs:
           echo "pre_deploy_coverage=$COVERAGE_NUM" >> $GITHUB_OUTPUT
           
           if awk "BEGIN {exit !($COVERAGE_NUM <= 75)}"; then
+            echo "[ERROR] =========================================="
             echo "[ERROR] Code coverage is below 75% (Current: $COVERAGE_NUM%)"
-            echo "[ERROR] Deployment succeeded but coverage is too low"
-            jq '.result.summary' deploy_with_validation_results.json 2>/dev/null || cat deploy_with_validation_results.json | head -50
+            echo "[ERROR] Deployment succeeded but coverage is too low - Salesforce may have rolled back"
+            echo "[ERROR] Per-class coverage (NEW changes validated):"
+            jq -r '.result.details.runTestResult.codeCoverage[]? | "  - \(.name): \(.numLocations - .numLocationsNotCovered)/\(.numLocations) locations covered"' deploy_with_validation_results.json 2>/dev/null || true
+            echo "[ERROR] =========================================="
+            jq '.result.details.runTestResult.codeCoverage // .result.summary' deploy_with_validation_results.json 2>/dev/null || cat deploy_with_validation_results.json | head -50
             echo "validation_passed=false" >> $GITHUB_OUTPUT
             exit 1
           fi
@@ -527,6 +543,14 @@ jobs:
             // Fail the workflow
             process.exit(1);
 
+      # Step 10b: Set job outputs for dependent jobs
+      - name: Set job outputs
+        id: set-outputs
+        if: always()
+        run: |
+          DEPLOY_SUCCESS="${{ steps.verify-deployment.outputs.deployment_success }}"
+          echo "deployment_success=${DEPLOY_SUCCESS:-false}" >> $GITHUB_OUTPUT
+
       # Step 11: Comment on PR
       - name: Comment on PR
         if: always()
@@ -537,7 +561,7 @@ jobs:
             const prNumber = context.payload.pull_request?.number || context.payload.pull_request.number;
             const merged = context.payload.pull_request?.merged === true;
             const mergedBy = context.payload.pull_request?.merged_by?.login || 'Unknown';
-            const deploymentSuccess = '${{ steps.deploy-delta.outputs.deployment_success }}' === 'true';
+            const deploymentSuccess = '${{ steps.verify-deployment.outputs.deployment_success }}' === 'true';
             const coverage = '${{ steps.apex.outputs.coverage }}';
             const jobStatus = '${{ job.status }}';
             const mergeCommit = context.payload.pull_request?.merge_commit_sha || 'N/A';
@@ -583,7 +607,7 @@ jobs:
           echo "**PR Status:** Merged ✅" >> $GITHUB_STEP_SUMMARY
           echo "**Merged by:** ${{ github.event.pull_request.merged_by.login }}" >> $GITHUB_STEP_SUMMARY
           echo "**Merge Commit:** ${{ github.event.pull_request.merge_commit_sha }}" >> $GITHUB_STEP_SUMMARY
-          echo "**Deployment:** ${{ steps.deploy-delta.outputs.deployment_success }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Deployment:** ${{ steps.verify-deployment.outputs.deployment_success }}" >> $GITHUB_STEP_SUMMARY
           echo "**Coverage:** ${{ steps.apex.outputs.coverage }}%" >> $GITHUB_STEP_SUMMARY
           echo "**Status:** ${{ job.status }}" >> $GITHUB_STEP_SUMMARY
           if [ "${{ job.status }}" = "success" ]; then
@@ -591,3 +615,147 @@ jobs:
           else
             echo "❌ **Deployment failed - Check logs for details**" >> $GITHUB_STEP_SUMMARY
           fi
+
+  # SIT Promotion - runs ONLY after successful DevTrial deployment (sequential)
+  promote-to-sit:
+    runs-on: ubuntu-latest
+    needs: deploy-after-merge
+    if: needs.deploy-after-merge.outputs.deployment_success == 'true' && needs.deploy-after-merge.outputs.has_changes == 'true'
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      checks: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
+      - name: Configure Git
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+      - uses: actions/setup-node@v3
+        with:
+          node-version: '18'
+      - name: Install Salesforce CLI
+        run: npm install @salesforce/cli --global
+      - name: Install sfdx git delta
+        run: |
+          echo Y | sfdx plugins:install sfdx-git-delta
+          sfdx plugins
+      - name: Install required tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y jq bc -qq
+      - name: Create SIT Promotional Branch
+        id: create-sit-promo
+        run: |
+          PROMO_BRANCH="${{ github.event.pull_request.head.ref }}"
+          FEATURE_NUM=$(echo "$PROMO_BRANCH" | sed 's/promo\///g')
+          SIT_PROMO_BRANCH="sit-promo/$FEATURE_NUM"
+          echo "[INFO] Original promo branch: $PROMO_BRANCH"
+          echo "[INFO] Creating SIT promotional branch: $SIT_PROMO_BRANCH"
+          git fetch origin CRM_SITTrial || git fetch origin main
+          BASE_BRANCH="CRM_SITTrial"
+          if git ls-remote --heads origin "$SIT_PROMO_BRANCH" | grep -q "$SIT_PROMO_BRANCH"; then
+            git fetch origin "$SIT_PROMO_BRANCH"
+            git checkout -b "$SIT_PROMO_BRANCH" "origin/$SIT_PROMO_BRANCH" 2>/dev/null || git checkout "$SIT_PROMO_BRANCH"
+            git reset --hard origin/$BASE_BRANCH || git reset --hard origin/main
+          else
+            git checkout -b "$SIT_PROMO_BRANCH" origin/$BASE_BRANCH || git checkout -b "$SIT_PROMO_BRANCH" origin/main
+          fi
+          MERGE_COMMIT="${{ github.event.pull_request.merge_commit_sha }}"
+          if git merge-base --is-ancestor "$MERGE_COMMIT" HEAD 2>/dev/null; then
+            echo "sit_promo_branch=$SIT_PROMO_BRANCH" >> $GITHUB_OUTPUT
+            echo "merge_success=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          git merge --no-ff "$MERGE_COMMIT" -m "Merge $MERGE_COMMIT from CRM_DevTrial2 into SIT promotional branch" || {
+            git merge --abort 2>/dev/null || true
+            echo "merge_success=false" >> $GITHUB_OUTPUT
+            exit 1
+          }
+          echo "sit_promo_branch=$SIT_PROMO_BRANCH" >> $GITHUB_OUTPUT
+          echo "merge_success=true" >> $GITHUB_OUTPUT
+          echo "[INFO] ✅ SIT promotional branch created"
+      - name: Generate Delta Packages for SIT
+        id: delta-generation-sit
+        if: steps.create-sit-promo.outputs.merge_success == 'true'
+        run: |
+          mkdir -p changed-sources-sit
+          SIT_PROMO_BRANCH="${{ steps.create-sit-promo.outputs.sit_promo_branch }}"
+          BASE_BRANCH="CRM_SITTrial"
+          git fetch origin "$BASE_BRANCH" || git fetch origin main
+          BASE_COMMIT=$(git rev-parse origin/$BASE_BRANCH 2>/dev/null || git rev-parse origin/main)
+          sf sgd source delta --from "$BASE_COMMIT" --to "HEAD" --output-dir "changed-sources-sit" --generate-delta --source-dir "force-app" || { echo "has_changes=false" >> $GITHUB_OUTPUT; exit 0; }
+          if [ -d "changed-sources-sit/force-app" ] && [ "$(ls -A changed-sources-sit/force-app 2>/dev/null)" ]; then
+            echo "has_changes=true" >> $GITHUB_OUTPUT
+          else
+            echo "has_changes=false" >> $GITHUB_OUTPUT
+          fi
+      - name: Run PMD Apex Checks for SIT
+        id: pmd-check-sit
+        continue-on-error: true
+        if: steps.create-sit-promo.outputs.merge_success == 'true' && steps.delta-generation-sit.outputs.has_changes == 'true'
+        run: |
+          chmod +x scripts/pmd-check.sh scripts/enhanced-pmd-check.sh 2>/dev/null || true
+          scripts/pmd-check.sh changed-sources-sit/force-app .pmd/apex-ruleset.xml 2>&1 | tee pmd-output-sit.log || true
+          VIOLATION_COUNT=$(cat pmd-violation-count.txt 2>/dev/null || echo "0")
+          echo "pmd_passed=true" >> $GITHUB_OUTPUT
+          echo "pmd_violations=$VIOLATION_COUNT" >> $GITHUB_OUTPUT
+      - name: Run Apex Tests against SIT Promotional Branch
+        id: apex-tests-sit
+        if: steps.create-sit-promo.outputs.merge_success == 'true' && steps.delta-generation-sit.outputs.has_changes == 'true'
+        run: |
+          chmod +x scripts/run-apex-tests.sh
+          scripts/run-apex-tests.sh force-app test_results_sit.json
+          echo "tests_passed=true" >> $GITHUB_OUTPUT
+      - name: Push SIT Promotional Branch and Create/Update PR
+        if: steps.create-sit-promo.outputs.merge_success == 'true' && steps.pmd-check-sit.outputs.pmd_passed == 'true' && steps.apex-tests-sit.outputs.tests_passed == 'true'
+        uses: actions/github-script@v6
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const sitPromoBranch = '${{ steps.create-sit-promo.outputs.sit_promo_branch }}';
+            const originalPromoBranch = '${{ github.event.pull_request.head.ref }}';
+            const { execSync } = require('child_process');
+            try {
+              try {
+                execSync(`git fetch origin ${sitPromoBranch}`, { stdio: 'pipe' });
+                const remoteCommit = execSync(`git rev-parse origin/${sitPromoBranch}`, { encoding: 'utf8' }).trim();
+                const localCommit = execSync(`git rev-parse HEAD`, { encoding: 'utf8' }).trim();
+                if (remoteCommit !== localCommit) {
+                  execSync(`git push --force-with-lease origin ${sitPromoBranch}`, { stdio: 'inherit' });
+                }
+              } catch (e) {
+                execSync(`git push -u origin ${sitPromoBranch}`, { stdio: 'inherit' });
+              }
+            } catch (err) {
+              execSync(`git push --force-with-lease origin ${sitPromoBranch}`, { stdio: 'inherit' });
+            }
+            const { data: existingPRs } = await github.rest.pulls.list({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              head: `${context.repo.owner}:${sitPromoBranch}`,
+              base: 'CRM_SITTrial',
+              state: 'open'
+            });
+            const prBody = `## SIT Promotional Branch (Deployed to CRM_DevTrial ✅)\n\n**Original:** \`${originalPromoBranch}\`\n**SIT Branch:** \`${sitPromoBranch}\`\n**Source:** CRM_DevTrial2 PR #${{ github.event.pull_request.number }}\n\n✅ DevTrial deployment succeeded\n✅ PMD passed\n✅ Apex tests validated\n\n**Deployment to CRM_SITOrg happens automatically after this PR is merged.**`;
+            if (existingPRs.length > 0) {
+              await github.rest.pulls.update({ owner: context.repo.owner, repo: context.repo.repo, pull_number: existingPRs[0].number, body: prBody });
+              console.log(`✅ PR updated: ${existingPRs[0].html_url}`);
+            } else {
+              const { data: pr } = await github.rest.pulls.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title: `SIT Promotional Branch: ${sitPromoBranch}`,
+                head: sitPromoBranch,
+                base: 'CRM_SITTrial',
+                body: prBody,
+                draft: false
+              });
+              console.log(`✅ PR created: ${pr.html_url}`);
+            }
