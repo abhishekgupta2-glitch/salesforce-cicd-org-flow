@@ -2,7 +2,7 @@ public class AccountUpdater {
 
     public static void updateAccountPhone() {
         
-        // Get first 5 accounts
+        // Get first 5 accountssds
         List<Account> accList = [SELECT Id, Phone FROM Account LIMIT 5];
         
         for(Account acc : accList) {
