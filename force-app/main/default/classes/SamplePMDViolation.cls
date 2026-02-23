@@ -2,7 +2,7 @@ public with sharing class SamplePMDViolation {
 
     public static void updateAccounts() {
         
-        // Get 5 AccountsSKJDIKJS
+        // Get 5 AccountsSKJDIKJSasa
         List<Account> accList = [
             SELECT Id, Name 
             FROM Account 
