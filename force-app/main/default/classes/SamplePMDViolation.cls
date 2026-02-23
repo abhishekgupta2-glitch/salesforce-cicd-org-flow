@@ -2,7 +2,7 @@ public with sharing class SamplePMDViolation {
 
     public static void updateAccounts() {
         
-        // Get 5 AccountsSKJDIKJS
+        // Get 5 AccountsSKJDIKJSasa
         List<Account> accList = [
             SELECT Id, Name 
             FROM Account 
@@ -13,7 +13,7 @@ public with sharing class SamplePMDViolation {
             return;
         }
         
-        // Update Account names+abhji
+        // Update Account names+abhjidsda
         for(Account acc : accList) {
             acc.Name = 'Updated Name';
         }
