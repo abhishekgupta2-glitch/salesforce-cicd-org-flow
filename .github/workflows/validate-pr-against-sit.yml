@@ -172,6 +172,8 @@ jobs:
           # Now try merging feature branch into promotional branch
           echo "[INFO] Attempting to merge feature branch into promotional branch..."
           echo "[INFO] Feature branch: origin/$FEATURE_BRANCH ($(git rev-parse origin/$FEATURE_BRANCH))"
+          
+          # Attempt merge and capture output
           set +e
           git merge --no-commit --no-ff "origin/$FEATURE_BRANCH" 2>&1 | tee merge_output.log
           MERGE_EXIT_CODE=$?
@@ -181,121 +183,175 @@ jobs:
           echo "[INFO] Merge output (last 30 lines):"
           tail -30 merge_output.log || cat merge_output.log
           
-          if [ $MERGE_EXIT_CODE -ne 0 ]; then
-            # Check if it's actually a conflict or just a merge that needs a commit message
-            if grep -q "CONFLICT" merge_output.log || grep -q "conflict" merge_output.log; then
-              echo "[ERROR] =========================================="
-              echo "[ERROR] Merge conflict detected!"
-              echo "[ERROR] =========================================="
-              
-              # Show detailed conflict information
-              echo "[ERROR] Git status:"
-              git status --short 2>/dev/null || echo "Could not get git status"
-              
-              echo "[ERROR] Conflicting files:"
-              CONFLICT_FILES=$(git diff --name-only --diff-filter=U 2>/dev/null || echo "")
-              if [ -n "$CONFLICT_FILES" ]; then
-                echo "$CONFLICT_FILES"
-              else
-                grep -i "CONFLICT\|conflict" merge_output.log | grep -v "^\[" | head -20
-              fi
-              
-              echo "[ERROR] =========================================="
-              echo "[ERROR] Conflict Analysis:"
-              echo "[ERROR] =========================================="
-              echo "[ERROR] Feature branch: $FEATURE_BRANCH (created from 'main')"
-              echo "[ERROR] Promotional branch: $PROMO_BRANCH (based on '$BASE_BRANCH')"
-              echo "[ERROR] Base commit: $BASE_COMMIT"
-              echo "[ERROR] Feature commit: $(git rev-parse origin/$FEATURE_BRANCH)"
-              echo "[ERROR] Main commit: $MAIN_COMMIT"
-              echo "[ERROR] Common ancestor: $MAIN_BASE"
-              echo "[ERROR] =========================================="
-              echo "[ERROR] **Root Cause:**"
-              echo "[ERROR]   - Your feature branch was created from 'main'"
-              echo "[ERROR]   - '$BASE_BRANCH' has changes from OTHER feature branches (already merged)"
-              echo "[ERROR]   - The SAME file was modified in BOTH:"
-              echo "[ERROR]     * Your feature branch modified: $(echo "$CONFLICT_FILES" | head -1)"
-              echo "[ERROR]     * Another feature branch (already in $BASE_BRANCH) also modified it"
-              echo "[ERROR]   - This creates a conflict that needs manual resolution"
-              echo "[ERROR] =========================================="
-              echo "[ERROR] **Why This Happens:**"
-              echo "[ERROR]   - '$BASE_BRANCH' accumulates changes from multiple feature branches"
-              echo "[ERROR]   - 'main' is only updated at the end (production copy)"
-              echo "[ERROR]   - So '$BASE_BRANCH' will ALWAYS have changes that 'main' doesn't have"
-              echo "[ERROR]   - This is EXPECTED and NORMAL in your workflow"
-              echo "[ERROR] =========================================="
-              echo "[ERROR] **Solution - Update Feature Branch with $BASE_BRANCH:**"
-              echo "[ERROR] =========================================="
-              echo "[ERROR] You need to merge $BASE_BRANCH into your feature branch to include"
-              echo "[ERROR] changes from other feature branches, then resolve conflicts:"
-              echo "[ERROR]"
-              echo "[ERROR]   1. Checkout your feature branch:"
-              echo "[ERROR]      git checkout $FEATURE_BRANCH"
-              echo "[ERROR]"
-              echo "[ERROR]   2. Fetch latest changes:"
-              echo "[ERROR]      git fetch origin"
-              echo "[ERROR]"
-              echo "[ERROR]   3. Merge $BASE_BRANCH into your feature branch:"
-              echo "[ERROR]      git merge origin/$BASE_BRANCH"
-              echo "[ERROR]"
-              echo "[ERROR]   4. Resolve conflicts manually:"
-              echo "[ERROR]      - Edit the conflicting files: $CONFLICT_FILES"
-              echo "[ERROR]      - Keep changes from both branches where appropriate"
-              echo "[ERROR]      - Remove conflict markers (<<<<<<, ======, >>>>>>)"
-              echo "[ERROR]"
-              echo "[ERROR]   5. Stage resolved files:"
-              echo "[ERROR]      git add ."
-              echo "[ERROR]"
-              echo "[ERROR]   6. Commit the merge:"
-              echo "[ERROR]      git commit -m 'Merge $BASE_BRANCH into $FEATURE_BRANCH'"
-              echo "[ERROR]"
-              echo "[ERROR]   7. Push updated feature branch:"
-              echo "[ERROR]      git push origin $FEATURE_BRANCH"
-              echo "[ERROR]"
-              echo "[ERROR]   8. The workflow will automatically run again"
-              echo "[ERROR] =========================================="
-              echo "[ERROR] **Important:** This ensures your feature branch includes all"
-              echo "[ERROR] changes from other feature branches that were merged into $BASE_BRANCH"
-              echo "[ERROR] =========================================="
-              git merge --abort 2>/dev/null || true
-              echo "merge_success=false" >> $GITHUB_OUTPUT
-              exit 1
-            else
-              # Not a conflict, might just need commit message - abort and try real merge
-              echo "[INFO] Merge check passed (no conflicts detected, exit code was $MERGE_EXIT_CODE)"
-              echo "[INFO] Output:"
-              cat merge_output.log | tail -20
-              git merge --abort 2>/dev/null || true
-            fi
-          else
-            # Merge succeeded in dry-run
-            echo "[INFO] ✅ No conflicts detected - feature branch can merge cleanly"
-            git merge --abort 2>/dev/null || true
+          # CRITICAL: Check for conflicts using MULTIPLE methods (exit code can be unreliable)
+          HAS_CONFLICTS=false
+          CONFLICT_FILES=""
+          
+          # Method 1: Check git status for unmerged files
+          if git status --short 2>/dev/null | grep -q "^UU\|^AA\|^DD\|^AU\|^UA\|^DU\|^UD"; then
+            HAS_CONFLICTS=true
+            CONFLICT_FILES=$(git diff --name-only --diff-filter=U 2>/dev/null || echo "")
+            echo "[ERROR] Conflict detected via git status (unmerged files)"
           fi
           
-          # Now do the actual merge
-          echo "[INFO] Performing merge..."
+          # Method 2: Check merge output for conflict keywords
+          if grep -qi "CONFLICT\|conflict\|merge conflict\|Automatic merge failed" merge_output.log; then
+            HAS_CONFLICTS=true
+            if [ -z "$CONFLICT_FILES" ]; then
+              CONFLICT_FILES=$(grep -i "CONFLICT" merge_output.log | grep -oP 'Merge conflict in \K[^\s]+' | head -5 | tr '\n' ' ' || echo "")
+            fi
+            echo "[ERROR] Conflict detected via merge output"
+          fi
+          
+          # Method 3: Check for conflict markers in files
+          if find . -type f -name "*.cls" -o -name "*.trigger" -o -name "*.xml" -o -name "*.js" -o -name "*.html" 2>/dev/null | xargs grep -l "^<<<<<<< " 2>/dev/null | head -1 | read -r conflict_file; then
+            HAS_CONFLICTS=true
+            if [ -z "$CONFLICT_FILES" ]; then
+              CONFLICT_FILES=$(find . -type f \( -name "*.cls" -o -name "*.trigger" -o -name "*.xml" -o -name "*.js" -o -name "*.html" \) -exec grep -l "^<<<<<<< " {} \; 2>/dev/null | head -5 | tr '\n' ' ' || echo "")
+            fi
+            echo "[ERROR] Conflict detected via conflict markers in files"
+          fi
+          
+          # Method 4: Check exit code (backup check)
+          if [ $MERGE_EXIT_CODE -ne 0 ] && [ "$HAS_CONFLICTS" = "false" ]; then
+            # Exit code non-zero but no conflicts detected - might be other error
+            echo "[WARN] Merge exit code is $MERGE_EXIT_CODE but no conflicts detected via other methods"
+            echo "[WARN] Checking git status for more details..."
+            git status
+          fi
+          
+          # If conflicts detected, FAIL IMMEDIATELY
+          if [ "$HAS_CONFLICTS" = "true" ]; then
+            echo "[ERROR] =========================================="
+            echo "[ERROR] ❌ MERGE CONFLICT DETECTED - WORKFLOW STOPPING"
+            echo "[ERROR] =========================================="
+            
+            # Show detailed conflict information
+            echo "[ERROR] Git status:"
+            git status --short 2>/dev/null || echo "Could not get git status"
+            
+            echo "[ERROR] Conflicting files:"
+            if [ -n "$CONFLICT_FILES" ]; then
+              echo "$CONFLICT_FILES" | tr ' ' '\n' | grep -v '^$'
+            else
+              git diff --name-only --diff-filter=U 2>/dev/null || echo "Could not list conflicting files"
+            fi
+            
+            echo "[ERROR] =========================================="
+            echo "[ERROR] Conflict Analysis:"
+            echo "[ERROR] =========================================="
+            echo "[ERROR] Feature branch: $FEATURE_BRANCH (created from 'main')"
+            echo "[ERROR] Promotional branch: $PROMO_BRANCH (based on '$BASE_BRANCH')"
+            echo "[ERROR] Base commit: $BASE_COMMIT"
+            echo "[ERROR] Feature commit: $(git rev-parse origin/$FEATURE_BRANCH)"
+            echo "[ERROR] Main commit: $MAIN_COMMIT"
+            echo "[ERROR] =========================================="
+            echo "[ERROR] **Root Cause:**"
+            echo "[ERROR]   - Your feature branch was created from 'main'"
+            echo "[ERROR]   - '$BASE_BRANCH' has changes from OTHER feature branches (already merged)"
+            echo "[ERROR]   - The SAME file was modified in BOTH:"
+            FIRST_CONFLICT=$(echo "$CONFLICT_FILES" | tr ' ' '\n' | head -1)
+            if [ -n "$FIRST_CONFLICT" ]; then
+              echo "[ERROR]     * Conflicting file: $FIRST_CONFLICT"
+            fi
+            echo "[ERROR]     * Another feature branch (already in $BASE_BRANCH) also modified it"
+            echo "[ERROR]   - This creates a conflict that needs manual resolution"
+            echo "[ERROR] =========================================="
+            echo "[ERROR] **Why This Happens:**"
+            echo "[ERROR]   - '$BASE_BRANCH' accumulates changes from multiple feature branches"
+            echo "[ERROR]   - 'main' is only updated at the end (production copy)"
+            echo "[ERROR]   - So '$BASE_BRANCH' will ALWAYS have changes that 'main' doesn't have"
+            echo "[ERROR]   - This is EXPECTED and NORMAL in your workflow"
+            echo "[ERROR] =========================================="
+            echo "[ERROR] **Solution - Update Feature Branch with $BASE_BRANCH:**"
+            echo "[ERROR] =========================================="
+            echo "[ERROR] You need to merge $BASE_BRANCH into your feature branch to include"
+            echo "[ERROR] changes from other feature branches, then resolve conflicts:"
+            echo "[ERROR]"
+            echo "[ERROR]   1. Checkout your feature branch:"
+            echo "[ERROR]      git checkout $FEATURE_BRANCH"
+            echo "[ERROR]"
+            echo "[ERROR]   2. Fetch latest changes:"
+            echo "[ERROR]      git fetch origin"
+            echo "[ERROR]"
+            echo "[ERROR]   3. Merge $BASE_BRANCH into your feature branch:"
+            echo "[ERROR]      git merge origin/$BASE_BRANCH"
+            echo "[ERROR]"
+            echo "[ERROR]   4. Resolve conflicts manually:"
+            if [ -n "$CONFLICT_FILES" ]; then
+              echo "[ERROR]      - Edit the conflicting files:"
+              echo "$CONFLICT_FILES" | tr ' ' '\n' | grep -v '^$' | sed 's/^/        * /'
+            fi
+            echo "[ERROR]      - Keep changes from both branches where appropriate"
+            echo "[ERROR]      - Remove conflict markers (<<<<<<, ======, >>>>>>)"
+            echo "[ERROR]"
+            echo "[ERROR]   5. Stage resolved files:"
+            echo "[ERROR]      git add ."
+            echo "[ERROR]"
+            echo "[ERROR]   6. Commit the merge:"
+            echo "[ERROR]      git commit -m 'Merge $BASE_BRANCH into $FEATURE_BRANCH'"
+            echo "[ERROR]"
+            echo "[ERROR]   7. Push updated feature branch:"
+            echo "[ERROR]      git push origin $FEATURE_BRANCH"
+            echo "[ERROR]"
+            echo "[ERROR]   8. The workflow will automatically run again"
+            echo "[ERROR] =========================================="
+            echo "[ERROR] **Important:** This ensures your feature branch includes all"
+            echo "[ERROR] changes from other feature branches that were merged into $BASE_BRANCH"
+            echo "[ERROR] =========================================="
+            
+            # Abort merge and fail
+            git merge --abort 2>/dev/null || true
+            echo "merge_success=false" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+          
+          # If merge exit code is non-zero but no conflicts detected, it's an error
+          if [ $MERGE_EXIT_CODE -ne 0 ]; then
+            echo "[ERROR] =========================================="
+            echo "[ERROR] Merge failed with exit code $MERGE_EXIT_CODE"
+            echo "[ERROR] =========================================="
+            echo "[ERROR] Merge output:"
+            cat merge_output.log
+            echo "[ERROR] Git status:"
+            git status
+            git merge --abort 2>/dev/null || true
+            echo "merge_success=false" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+          
+          # Merge succeeded - commit it
+          echo "[INFO] ✅ No conflicts detected - committing merge..."
+          git merge --abort 2>/dev/null || true  # Abort dry-run first
+          
+          # Perform actual merge
           set +e
           git merge --no-ff "origin/$FEATURE_BRANCH" -m "Merge $FEATURE_BRANCH into promotional branch" 2>&1 | tee merge_actual.log
           MERGE_ACTUAL_EXIT=$?
           set -e
           
           if [ $MERGE_ACTUAL_EXIT -ne 0 ]; then
-            if grep -q "CONFLICT" merge_actual.log || grep -q "conflict" merge_actual.log; then
-              echo "[ERROR] =========================================="
-              echo "[ERROR] Merge conflict detected during actual merge!"
-              echo "[ERROR] =========================================="
-              git status
-              git merge --abort 2>/dev/null || true
-              echo "merge_success=false" >> $GITHUB_OUTPUT
-              exit 1
-            else
-              echo "[ERROR] Merge failed for unknown reason"
-              cat merge_actual.log
-              git merge --abort 2>/dev/null || true
-              echo "merge_success=false" >> $GITHUB_OUTPUT
-              exit 1
-            fi
+            echo "[ERROR] =========================================="
+            echo "[ERROR] Actual merge failed with exit code $MERGE_ACTUAL_EXIT"
+            echo "[ERROR] =========================================="
+            echo "[ERROR] Merge output:"
+            cat merge_actual.log
+            echo "[ERROR] Git status:"
+            git status
+            git merge --abort 2>/dev/null || true
+            echo "merge_success=false" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+          
+          # Verify merge was successful
+          if git status --short 2>/dev/null | grep -q "^UU\|^AA\|^DD\|^AU\|^UA\|^DU\|^UD"; then
+            echo "[ERROR] =========================================="
+            echo "[ERROR] Conflicts detected after merge commit!"
+            echo "[ERROR] =========================================="
+            git status
+            git reset --hard HEAD~1 2>/dev/null || true  # Undo merge commit
+            echo "merge_success=false" >> $GITHUB_OUTPUT
+            exit 1
           fi
           
           echo "promo_branch=$PROMO_BRANCH" >> $GITHUB_OUTPUT
@@ -511,7 +567,6 @@ jobs:
       - name: Run Apex Tests against Promotional Branch
         if: steps.validate-merge.outputs.merge_success == 'true' && steps.pmd-check.outputs.pmd_passed == 'true'
         id: apex-tests
-        continue-on-error: true
         run: |
           chmod +x scripts/run-apex-tests.sh
           
@@ -522,7 +577,7 @@ jobs:
           set -e
           
           if [ ! -f test_results.json ]; then
-            echo "[ERROR] Test results file not generated"
+            echo "[ERROR] ❌ Test results file not generated"
             echo "tests_passed=false" >> $GITHUB_OUTPUT
             exit 1
           fi
@@ -539,7 +594,7 @@ jobs:
 
       # Step 11b: Handle Test Validation Failure - Close PR and Cleanup
       - name: Handle Test Validation Failure
-        if: steps.validate-merge.outputs.merge_success == 'true' && (steps.apex-tests.outputs.tests_passed == 'false' || steps.apex-tests.outcome == 'failure')
+        if: always() && steps.validate-merge.outputs.merge_success == 'true' && (steps.apex-tests.outputs.tests_passed == 'false' || steps.apex-tests.outcome == 'failure' || steps.apex-tests.outcome == 'cancelled')
         uses: actions/github-script@v6
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
@@ -628,9 +683,30 @@ jobs:
             const promoBranch = '${{ steps.validate-merge.outputs.promo_branch }}';
             const featureBranch = '${GITHUB_REF#refs/heads/}';
             const mergeSuccess = '${{ steps.validate-merge.outputs.merge_success }}' === 'true';
+            const baseBranch = 'CRM_DevTrial2';
             
             // Push promotional branch (handle existing branch with force-with-lease)
             const { execSync } = require('child_process');
+            
+            // CRITICAL: Verify there are commits to merge before creating PR
+            try {
+              const baseCommit = execSync(`git rev-parse origin/${baseBranch}`, { encoding: 'utf8' }).trim();
+              const promoCommit = execSync(`git rev-parse HEAD`, { encoding: 'utf8' }).trim();
+              
+              if (baseCommit === promoCommit) {
+                console.error(`[ERROR] ❌ No commits between ${baseBranch} and ${promoBranch}`);
+                console.error(`[ERROR] This means the merge was aborted or no changes were merged`);
+                console.error(`[ERROR] Base commit: ${baseCommit}`);
+                console.error(`[ERROR] Promo commit: ${promoCommit}`);
+                console.error(`[ERROR] Workflow should have failed earlier - this is a critical error`);
+                process.exit(1);
+              }
+              
+              console.log(`✅ Verified commits exist: ${baseBranch} (${baseCommit.substring(0, 7)}) -> ${promoBranch} (${promoCommit.substring(0, 7)})`);
+            } catch (error) {
+              console.error(`[ERROR] Failed to verify commits: ${error.message}`);
+              process.exit(1);
+            }
             try {
               // First, fetch the remote branch to check if it exists
               try {
@@ -733,7 +809,16 @@ jobs:
             echo "**PMD Violations:** ✅ None" >> $GITHUB_STEP_SUMMARY
           fi
           
-          echo "**Apex Tests:** ${{ steps.apex-tests.outputs.tests_passed }}" >> $GITHUB_STEP_SUMMARY
+          # Show test status
+          if [ "${{ steps.apex-tests.outputs.tests_passed }}" = "true" ]; then
+            echo "**Apex Tests:** ✅ Passed" >> $GITHUB_STEP_SUMMARY
+          elif [ "${{ steps.apex-tests.outcome }}" = "failure" ] || [ "${{ steps.apex-tests.outcome }}" = "cancelled" ]; then
+            echo "**Apex Tests:** ❌ Failed" >> $GITHUB_STEP_SUMMARY
+            echo "⚠️ **Issue:** Test class validation failed. See workflow logs for details." >> $GITHUB_STEP_SUMMARY
+          else
+            echo "**Apex Tests:** ⏭️ Skipped" >> $GITHUB_STEP_SUMMARY
+          fi
+          
           if [ "${{ steps.validate-merge.outputs.merge_success }}" = "true" ]; then
             echo "**Promotional Branch:** \`${{ steps.validate-merge.outputs.promo_branch }}\`" >> $GITHUB_STEP_SUMMARY
             echo "**Promotional Branch Contains:** ✅ Delta changes from feature branch merged into CRM_DevTrial2" >> $GITHUB_STEP_SUMMARY
@@ -749,5 +834,8 @@ jobs:
             echo "❌ **Status:** Validation failed - Please fix issues" >> $GITHUB_STEP_SUMMARY
             if [ "${{ steps.validate-merge.outputs.merge_success }}" != "true" ]; then
               echo "⚠️ **Issue:** Merge conflict detected. Please resolve conflicts between feature branch and CRM_DevTrial2" >> $GITHUB_STEP_SUMMARY
+            fi
+            if [ "${{ steps.apex-tests.outputs.tests_passed }}" = "false" ] || [ "${{ steps.apex-tests.outcome }}" = "failure" ]; then
+              echo "⚠️ **Issue:** Test class validation failed. Fix test classes and push again." >> $GITHUB_STEP_SUMMARY
             fi
           fi
