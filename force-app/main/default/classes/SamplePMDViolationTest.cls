@@ -4,7 +4,7 @@ public class SamplePMDViolationTest {
     @isTest
     static void testUpdateAccounts() {
         
-        // Create test Accounts ajgdussssadas
+        // Create test Accounts ajgdussssadasjhhj
         List<Account> accList = new List<Account>();
         for(Integer i = 0; i < 5; i++) {
             accList.add(new Account(Name = 'Test Account ' + i));
