@@ -72,9 +72,24 @@ jobs:
           BASE_BRANCH="CRM_DevTrial2"
           BASE_COMMIT=$(git rev-parse origin/$BASE_BRANCH 2>/dev/null || git rev-parse origin/main)
           
+          # Check what the feature branch is based on
+          FEATURE_BASE=$(git merge-base "origin/$FEATURE_BRANCH" "origin/main" 2>/dev/null || echo "")
+          FEATURE_BASE_DEV=$(git merge-base "origin/$FEATURE_BRANCH" "origin/$BASE_BRANCH" 2>/dev/null || echo "")
+          
           echo "[INFO] Base branch: $BASE_BRANCH"
           echo "[INFO] Base commit: $BASE_COMMIT"
           echo "[INFO] Feature commit: $(git rev-parse origin/$FEATURE_BRANCH)"
+          echo "[INFO] Feature branch common ancestor with main: $FEATURE_BASE"
+          echo "[INFO] Feature branch common ancestor with $BASE_BRANCH: $FEATURE_BASE_DEV"
+          
+          # Check if feature branch is based on main (not CRM_DevTrial2)
+          MAIN_COMMIT=$(git rev-parse origin/main 2>/dev/null || echo "")
+          if [ -n "$FEATURE_BASE" ] && [ "$FEATURE_BASE" = "$MAIN_COMMIT" ] && [ -n "$FEATURE_BASE_DEV" ] && [ "$FEATURE_BASE_DEV" != "$BASE_COMMIT" ]; then
+            echo "[INFO] ⚠️  Feature branch appears to be created from 'main'"
+            echo "[INFO] ⚠️  But promotional branch is based on '$BASE_BRANCH'"
+            echo "[INFO] ⚠️  This may cause merge conflicts if main and $BASE_BRANCH have diverged"
+            echo "[INFO] ℹ️  Will attempt to merge $BASE_BRANCH into feature branch first to resolve conflicts"
+          fi
           
           # Check if promotional branch already exists
           if git ls-remote --heads origin "$PROMO_BRANCH" | grep -q "$PROMO_BRANCH"; then
@@ -82,7 +97,39 @@ jobs:
             echo "[INFO] Checking out existing promotional branch"
             git checkout -b "$PROMO_BRANCH" "origin/$PROMO_BRANCH" 2>/dev/null || git checkout "$PROMO_BRANCH"
             echo "[INFO] Current promotional branch commit: $(git rev-parse HEAD)"
-            echo "[INFO] Resetting to base branch to ensure clean merge with latest feature changes"
+            
+            # Check if feature branch is already merged into promotional branch
+            if git merge-base --is-ancestor "origin/$FEATURE_BRANCH" HEAD 2>/dev/null; then
+              echo "[INFO] Feature branch $FEATURE_BRANCH is already merged into promotional branch"
+              FEATURE_COMMIT=$(git rev-parse "origin/$FEATURE_BRANCH")
+              CURRENT_COMMIT=$(git rev-parse HEAD)
+              
+              # Check if promotional branch is ahead or equal to feature branch
+              if git merge-base --is-ancestor "origin/$FEATURE_BRANCH" HEAD 2>/dev/null && ! git merge-base --is-ancestor HEAD "origin/$FEATURE_BRANCH" 2>/dev/null; then
+                echo "[INFO] Promotional branch already contains feature branch changes"
+                echo "[INFO] Checking if feature branch has new commits..."
+                
+                # Check if feature branch has new commits not in promotional branch
+                if git rev-list --left-right --count HEAD...origin/$FEATURE_BRANCH | awk '{print $2}' | grep -q '[1-9]'; then
+                  echo "[INFO] Feature branch has new commits. Attempting merge..."
+                else
+                  echo "[INFO] Promotional branch is up to date with feature branch. No merge needed."
+                  echo "promo_branch=$PROMO_BRANCH" >> $GITHUB_OUTPUT
+                  echo "merge_success=true" >> $GITHUB_OUTPUT
+                  echo "base_commit=$BASE_COMMIT" >> $GITHUB_OUTPUT
+                  exit 0
+                fi
+              else
+                echo "[INFO] Promotional branch is up to date with feature branch. No merge needed."
+                echo "promo_branch=$PROMO_BRANCH" >> $GITHUB_OUTPUT
+                echo "merge_success=true" >> $GITHUB_OUTPUT
+                echo "base_commit=$BASE_COMMIT" >> $GITHUB_OUTPUT
+                exit 0
+              fi
+            fi
+            
+            # If feature branch is not merged, reset to base branch for clean merge
+            echo "[INFO] Resetting promotional branch to $BASE_BRANCH to ensure clean merge"
             git reset --hard origin/$BASE_BRANCH || git reset --hard origin/main
             echo "[INFO] Promotional branch reset to $BASE_BRANCH for clean merge"
           else
@@ -91,46 +138,165 @@ jobs:
             git checkout -b "$PROMO_BRANCH" origin/$BASE_BRANCH || git checkout -b "$PROMO_BRANCH" origin/main
           fi
           
-          # Check if feature branch is already merged (to avoid duplicate merges)
-          if git merge-base --is-ancestor "origin/$FEATURE_BRANCH" HEAD 2>/dev/null; then
-            echo "[INFO] Feature branch $FEATURE_BRANCH is already merged into promotional branch"
-            echo "[INFO] Checking if feature branch has new commits..."
-            FEATURE_COMMIT=$(git rev-parse "origin/$FEATURE_BRANCH")
-            CURRENT_COMMIT=$(git rev-parse HEAD)
-            if [ "$FEATURE_COMMIT" = "$CURRENT_COMMIT" ] || git merge-base --is-ancestor HEAD "origin/$FEATURE_BRANCH" 2>/dev/null; then
-              echo "[INFO] Promotional branch is up to date with feature branch. No merge needed."
-              echo "promo_branch=$PROMO_BRANCH" >> $GITHUB_OUTPUT
-              echo "merge_success=true" >> $GITHUB_OUTPUT
-              echo "base_commit=$BASE_COMMIT" >> $GITHUB_OUTPUT
-              exit 0
+          # IMPORTANT: Promotional branch MUST be based on CRM_DevTrial2 to include all previous feature branches
+          # Feature branches are created from 'main', so if main and CRM_DevTrial2 have diverged, we need to handle it
+          
+          echo "[INFO] Promotional branch is based on $BASE_BRANCH (includes all previous feature branches)"
+          echo "[INFO] Feature branch is created from 'main'"
+          
+          # IMPORTANT: CRM_DevTrial2 accumulates changes from multiple feature branches
+          # Main is only updated at the end (production copy)
+          # So CRM_DevTrial2 will ALWAYS have changes that main doesn't have
+          # This is EXPECTED and NORMAL behavior
+          
+          echo "[INFO] Understanding branch relationships:"
+          echo "[INFO]   - Feature branches are created from 'main'"
+          echo "[INFO]   - Feature branches are merged into '$BASE_BRANCH' (accumulates changes)"
+          echo "[INFO]   - 'main' is only updated at the end (production copy)"
+          echo "[INFO]   - So '$BASE_BRANCH' will ALWAYS have changes from other feature branches"
+          echo "[INFO]   - This is EXPECTED and NORMAL"
+          echo "[INFO]"
+          echo "[INFO] Merge strategy:"
+          echo "[INFO]   - Promotional branch = '$BASE_BRANCH' (includes all previous feature branches)"
+          echo "[INFO]   - Feature branch = based on 'main' (has new changes)"
+          echo "[INFO]   - If same file modified in both: conflict (needs manual resolution)"
+          echo "[INFO]   - If different files: no conflict (both changes included)"
+          
+          # Show current state before merging feature branch
+          echo "[INFO] Current promotional branch state:"
+          echo "[INFO]   HEAD: $(git rev-parse HEAD)"
+          echo "[INFO]   Branch: $(git rev-parse --abbrev-ref HEAD)"
+          echo "[INFO]   Log (last 3 commits):"
+          git log --oneline -3 || echo "Could not get log"
+          
+          # Now try merging feature branch into promotional branch
+          echo "[INFO] Attempting to merge feature branch into promotional branch..."
+          echo "[INFO] Feature branch: origin/$FEATURE_BRANCH ($(git rev-parse origin/$FEATURE_BRANCH))"
+          set +e
+          git merge --no-commit --no-ff "origin/$FEATURE_BRANCH" 2>&1 | tee merge_output.log
+          MERGE_EXIT_CODE=$?
+          set -e
+          
+          echo "[INFO] Merge exit code: $MERGE_EXIT_CODE"
+          echo "[INFO] Merge output (last 30 lines):"
+          tail -30 merge_output.log || cat merge_output.log
+          
+          if [ $MERGE_EXIT_CODE -ne 0 ]; then
+            # Check if it's actually a conflict or just a merge that needs a commit message
+            if grep -q "CONFLICT" merge_output.log || grep -q "conflict" merge_output.log; then
+              echo "[ERROR] =========================================="
+              echo "[ERROR] Merge conflict detected!"
+              echo "[ERROR] =========================================="
+              
+              # Show detailed conflict information
+              echo "[ERROR] Git status:"
+              git status --short 2>/dev/null || echo "Could not get git status"
+              
+              echo "[ERROR] Conflicting files:"
+              CONFLICT_FILES=$(git diff --name-only --diff-filter=U 2>/dev/null || echo "")
+              if [ -n "$CONFLICT_FILES" ]; then
+                echo "$CONFLICT_FILES"
+              else
+                grep -i "CONFLICT\|conflict" merge_output.log | grep -v "^\[" | head -20
+              fi
+              
+              echo "[ERROR] =========================================="
+              echo "[ERROR] Conflict Analysis:"
+              echo "[ERROR] =========================================="
+              echo "[ERROR] Feature branch: $FEATURE_BRANCH (created from 'main')"
+              echo "[ERROR] Promotional branch: $PROMO_BRANCH (based on '$BASE_BRANCH')"
+              echo "[ERROR] Base commit: $BASE_COMMIT"
+              echo "[ERROR] Feature commit: $(git rev-parse origin/$FEATURE_BRANCH)"
+              echo "[ERROR] Main commit: $MAIN_COMMIT"
+              echo "[ERROR] Common ancestor: $MAIN_BASE"
+              echo "[ERROR] =========================================="
+              echo "[ERROR] **Root Cause:**"
+              echo "[ERROR]   - Your feature branch was created from 'main'"
+              echo "[ERROR]   - '$BASE_BRANCH' has changes from OTHER feature branches (already merged)"
+              echo "[ERROR]   - The SAME file was modified in BOTH:"
+              echo "[ERROR]     * Your feature branch modified: $(echo "$CONFLICT_FILES" | head -1)"
+              echo "[ERROR]     * Another feature branch (already in $BASE_BRANCH) also modified it"
+              echo "[ERROR]   - This creates a conflict that needs manual resolution"
+              echo "[ERROR] =========================================="
+              echo "[ERROR] **Why This Happens:**"
+              echo "[ERROR]   - '$BASE_BRANCH' accumulates changes from multiple feature branches"
+              echo "[ERROR]   - 'main' is only updated at the end (production copy)"
+              echo "[ERROR]   - So '$BASE_BRANCH' will ALWAYS have changes that 'main' doesn't have"
+              echo "[ERROR]   - This is EXPECTED and NORMAL in your workflow"
+              echo "[ERROR] =========================================="
+              echo "[ERROR] **Solution - Update Feature Branch with $BASE_BRANCH:**"
+              echo "[ERROR] =========================================="
+              echo "[ERROR] You need to merge $BASE_BRANCH into your feature branch to include"
+              echo "[ERROR] changes from other feature branches, then resolve conflicts:"
+              echo "[ERROR]"
+              echo "[ERROR]   1. Checkout your feature branch:"
+              echo "[ERROR]      git checkout $FEATURE_BRANCH"
+              echo "[ERROR]"
+              echo "[ERROR]   2. Fetch latest changes:"
+              echo "[ERROR]      git fetch origin"
+              echo "[ERROR]"
+              echo "[ERROR]   3. Merge $BASE_BRANCH into your feature branch:"
+              echo "[ERROR]      git merge origin/$BASE_BRANCH"
+              echo "[ERROR]"
+              echo "[ERROR]   4. Resolve conflicts manually:"
+              echo "[ERROR]      - Edit the conflicting files: $CONFLICT_FILES"
+              echo "[ERROR]      - Keep changes from both branches where appropriate"
+              echo "[ERROR]      - Remove conflict markers (<<<<<<, ======, >>>>>>)"
+              echo "[ERROR]"
+              echo "[ERROR]   5. Stage resolved files:"
+              echo "[ERROR]      git add ."
+              echo "[ERROR]"
+              echo "[ERROR]   6. Commit the merge:"
+              echo "[ERROR]      git commit -m 'Merge $BASE_BRANCH into $FEATURE_BRANCH'"
+              echo "[ERROR]"
+              echo "[ERROR]   7. Push updated feature branch:"
+              echo "[ERROR]      git push origin $FEATURE_BRANCH"
+              echo "[ERROR]"
+              echo "[ERROR]   8. The workflow will automatically run again"
+              echo "[ERROR] =========================================="
+              echo "[ERROR] **Important:** This ensures your feature branch includes all"
+              echo "[ERROR] changes from other feature branches that were merged into $BASE_BRANCH"
+              echo "[ERROR] =========================================="
+              git merge --abort 2>/dev/null || true
+              echo "merge_success=false" >> $GITHUB_OUTPUT
+              exit 1
+            else
+              # Not a conflict, might just need commit message - abort and try real merge
+              echo "[INFO] Merge check passed (no conflicts detected, exit code was $MERGE_EXIT_CODE)"
+              echo "[INFO] Output:"
+              cat merge_output.log | tail -20
+              git merge --abort 2>/dev/null || true
             fi
+          else
+            # Merge succeeded in dry-run
+            echo "[INFO] ✅ No conflicts detected - feature branch can merge cleanly"
+            git merge --abort 2>/dev/null || true
           fi
           
-          # CRITICAL: Try merge in dry-run mode first to detect conflicts
-          echo "[INFO] Checking for merge conflicts between $FEATURE_BRANCH and $BASE_BRANCH..."
-          git merge --no-commit --no-ff "origin/$FEATURE_BRANCH" || {
-            MERGE_CONFLICT=$?
-            echo "[ERROR] Merge conflict detected! Cannot proceed."
-            echo "[ERROR] Please resolve conflicts between $FEATURE_BRANCH and $BASE_BRANCH"
-            echo "[ERROR] Conflict detected in promotional branch merge"
-            git merge --abort 2>/dev/null || true
-            echo "merge_success=false" >> $GITHUB_OUTPUT
-            exit 1
-          }
-          
-          # If dry-run succeeds, abort and do real merge
-          git merge --abort
-          
           # Now do the actual merge
-          echo "[INFO] No conflicts detected. Performing merge..."
-          git merge --no-ff "origin/$FEATURE_BRANCH" -m "Merge $FEATURE_BRANCH into promotional branch" || {
-            echo "[ERROR] Failed to merge feature branch into promotional branch"
-            echo "[ERROR] This might be due to conflicts or other merge issues"
-            echo "[ERROR] Please check if feature branch is in sync with $BASE_BRANCH"
-            git merge --abort 2>/dev/null || true
-            echo "merge_success=false" >> $GITHUB_OUTPUT
-            exit 1
-          }
+          echo "[INFO] Performing merge..."
+          set +e
+          git merge --no-ff "origin/$FEATURE_BRANCH" -m "Merge $FEATURE_BRANCH into promotional branch" 2>&1 | tee merge_actual.log
+          MERGE_ACTUAL_EXIT=$?
+          set -e
+          
+          if [ $MERGE_ACTUAL_EXIT -ne 0 ]; then
+            if grep -q "CONFLICT" merge_actual.log || grep -q "conflict" merge_actual.log; then
+              echo "[ERROR] =========================================="
+              echo "[ERROR] Merge conflict detected during actual merge!"
+              echo "[ERROR] =========================================="
+              git status
+              git merge --abort 2>/dev/null || true
+              echo "merge_success=false" >> $GITHUB_OUTPUT
+              exit 1
+            else
+              echo "[ERROR] Merge failed for unknown reason"
+              cat merge_actual.log
+              git merge --abort 2>/dev/null || true
+              echo "merge_success=false" >> $GITHUB_OUTPUT
+              exit 1
+            fi
+          fi
           
           echo "promo_branch=$PROMO_BRANCH" >> $GITHUB_OUTPUT
           echo "merge_success=true" >> $GITHUB_OUTPUT
