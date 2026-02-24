@@ -1,0 +1,132 @@
+# Merge and Deploy to UAT
+# Manual workflow - Run from Actions tab with "Run workflow" button
+# Supports multiple source branches (comma-separated)
+# Defaults: Use Variables (Settings > Actions > Variables) - MERGE_UAT_SOURCE, MERGE_UAT_DESTINATION
+# Or fill inputs when running
+
+name: Merge and Deploy to UAT
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_branches:
+        description: 'Source branch(es) - comma-separated for multiple (e.g. feature/101,feature/102,feature/103)'
+        required: false
+        default: ''
+      destination_branch:
+        description: 'Destination branch (e.g. UAT, CRM_UAT)'
+        required: false
+        default: ''
+      deploy_to_org:
+        description: 'Deploy to UAT org after merge'
+        required: false
+        default: false
+        type: boolean
+
+jobs:
+  merge-and-deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure Git
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Resolve Source and Destination
+        id: resolve
+        run: |
+          # Priority: 1) workflow inputs  2) variables  3) secrets
+          SOURCE_INPUT="${{ github.event.inputs.source_branches }}"
+          DEST_INPUT="${{ github.event.inputs.destination_branch }}"
+          SOURCE_VAR="${{ vars.MERGE_UAT_SOURCE }}"
+          DEST_VAR="${{ vars.MERGE_UAT_DESTINATION }}"
+          SOURCE_SECRET="${{ secrets.MERGE_UAT_SOURCE }}"
+          DEST_SECRET="${{ secrets.MERGE_UAT_DESTINATION }}"
+          
+          SOURCES="${SOURCE_INPUT:-${SOURCE_VAR:-$SOURCE_SECRET}}"
+          DESTINATION="${DEST_INPUT:-${DEST_VAR:-$DEST_SECRET}}"
+          
+          if [ -z "$SOURCES" ] || [ -z "$DESTINATION" ]; then
+            echo "[ERROR] Source and Destination must be provided."
+            echo "[ERROR] Either:"
+            echo "[ERROR]   1. Fill in the workflow inputs when running, OR"
+            echo "[ERROR]   2. Add Variables: Settings > Actions > Variables > MERGE_UAT_SOURCE, MERGE_UAT_DESTINATION"
+            echo "[ERROR]"
+            echo "[ERROR] Source (comma-separated for multiple): $SOURCES"
+            echo "[ERROR] Destination: $DESTINATION"
+            exit 1
+          fi
+          
+          echo "source_branches=$SOURCES" >> $GITHUB_OUTPUT
+          echo "destination_branch=$DESTINATION" >> $GITHUB_OUTPUT
+          echo "[INFO] Source branch(es): $SOURCES"
+          echo "[INFO] Destination branch: $DESTINATION"
+
+      - name: Merge source branches into destination
+        id: merge
+        run: |
+          DESTINATION="${{ steps.resolve.outputs.destination_branch }}"
+          SOURCES="${{ steps.resolve.outputs.source_branches }}"
+          
+          # Fetch all branches
+          git fetch origin
+          
+          # Ensure destination branch exists
+          if ! git rev-parse --verify "origin/$DESTINATION" >/dev/null 2>&1; then
+            echo "[ERROR] Destination branch '$DESTINATION' does not exist on remote"
+            exit 1
+          fi
+          
+          # Checkout destination
+          git checkout -B "$DESTINATION" "origin/$DESTINATION"
+          
+          # Parse comma-separated sources (trim spaces)
+          IFS=',' read -ra BRANCHES <<< "$SOURCES"
+          MERGED_BRANCHES=""
+          
+          for BRANCH in "${BRANCHES[@]}"; do
+            BRANCH=$(echo "$BRANCH" | xargs)
+            [ -z "$BRANCH" ] && continue
+            
+            if ! git rev-parse --verify "origin/$BRANCH" >/dev/null 2>&1; then
+              echo "[ERROR] Source branch '$BRANCH' does not exist on remote"
+              exit 1
+            fi
+            
+            echo "[INFO] Merging origin/$BRANCH into $DESTINATION..."
+            if git merge "origin/$BRANCH" -m "Merge $BRANCH into $DESTINATION (Merge and Deploy to UAT)"; then
+              MERGED_BRANCHES="${MERGED_BRANCHES}${BRANCH}, "
+              echo "[INFO] ✅ Merged $BRANCH successfully"
+            else
+              echo "[ERROR] Merge conflict when merging $BRANCH"
+              echo "[ERROR] Please resolve conflicts manually"
+              git status
+              exit 1
+            fi
+          done
+          
+          echo "merged_branches=${MERGED_BRANCHES%, }" >> $GITHUB_OUTPUT
+          echo "[INFO] All merges completed successfully"
+
+      - name: Push to destination
+        run: |
+          DESTINATION="${{ steps.resolve.outputs.destination_branch }}"
+          git push origin "$DESTINATION"
+          echo "[INFO] ✅ Pushed to $DESTINATION"
+
+      # Optional: Deploy to UAT org (enable via "Deploy to UAT org" checkbox when running)
+      - name: Deploy to UAT Org (Salesforce)
+        if: github.event.inputs.deploy_to_org == 'true'
+        run: |
+          echo "[INFO] Deploy to org enabled - configure UAT JWT secrets to enable"
+          echo "[INFO] Required: SF_JWT_KEY_UAT, SF_USERNAME_UAT, SF_CLIENT_ID_UAT, SF_INSTANCE_URL_UAT"
